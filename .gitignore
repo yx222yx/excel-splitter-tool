@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Build artifacts
+build/
+dist/
+
+# Runtime and test output
+outputs/
+.test-tmp/
+*.log
+
+# Excel business data
+*.xlsx
+*.xlsm
+*.xls
+~$*.xlsx
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

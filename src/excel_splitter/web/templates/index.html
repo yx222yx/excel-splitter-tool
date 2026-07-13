@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Excel 通用拆表工具</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">Excel 通用拆表工具</div>
+      <nav class="steps" aria-label="处理步骤">
+        <button class="step active" data-step="1"><span>1</span>选择文件</button>
+        <button class="step" data-step="2" disabled><span>2</span>选择 Sheet</button>
+        <button class="step" data-step="3" disabled><span>3</span>配置字段</button>
+        <button class="step" data-step="4" disabled><span>4</span>选择拆分值</button>
+        <button class="step" data-step="5" disabled><span>5</span>输出设置</button>
+        <button class="step" data-step="6" disabled><span>6</span>执行结果</button>
+      </nav>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <h1 id="page-title">选择 Excel 文件</h1>
+          <div id="file-status" class="muted">未加载文件</div>
+        </div>
+        <div id="busy" class="busy" hidden>处理中</div>
+      </header>
+
+      <div id="alert" class="alert" hidden role="alert"></div>
+
+      <section class="panel active" data-panel="1">
+        <div id="upload-zone" class="upload-zone">
+          <label id="file-picker" class="file-picker" for="excel-file">选择 .xlsx 文件</label>
+          <input id="excel-file" type="file" accept=".xlsx" hidden>
+          <div class="file-selection">
+            <strong id="selected-file" class="selected-file-name">尚未选择文件</strong>
+            <span id="selected-file-size" class="muted">支持最大 100 MB 的 .xlsx 文件</span>
+          </div>
+        </div>
+        <div class="actions"><button id="load-file" class="primary">加载工作簿</button></div>
+      </section>
+
+      <section class="panel" data-panel="2">
+        <div id="sheet-list" class="check-list"></div>
+        <div class="actions">
+          <button class="secondary back" data-target="1">上一步</button>
+          <button id="configure-sheets" class="primary">配置所选 Sheet</button>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="3">
+        <div id="sheet-configs" class="sheet-configs"></div>
+        <div class="actions">
+          <button class="secondary back" data-target="2">上一步</button>
+          <button id="load-values" class="primary">读取拆分值</button>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="4">
+        <div class="segmented" role="radiogroup" aria-label="拆分模式">
+          <label><input type="radio" name="split-mode" value="all" checked>全部值</label>
+          <label><input type="radio" name="split-mode" value="selected">手动勾选</label>
+        </div>
+        <div id="value-toolbar" class="value-toolbar" hidden>
+          <button id="select-all-values" class="secondary small">全选</button>
+          <button id="clear-values" class="secondary small">清空</button>
+        </div>
+        <div id="split-values" class="check-list values"></div>
+        <div class="actions">
+          <button class="secondary back" data-target="3">上一步</button>
+          <button id="to-output" class="primary">设置输出</button>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="5">
+        <div class="form-grid">
+          <label>输出目录<span class="input-action"><input id="output-dir" type="text"><button id="browse-output-dir" type="button" class="secondary">选择文件夹</button></span></label>
+          <label>文件名模板<input id="filename-template" type="text" value="{original_name}_{split_value}_{output_type}"></label>
+          <fieldset class="output-types">
+            <legend>输出版本</legend>
+            <div class="output-type-options">
+              <label><input type="checkbox" name="output-type" value="formula" checked><span>公式版</span></label>
+              <label><input type="checkbox" name="output-type" value="values" checked><span>结果值版</span></label>
+            </div>
+          </fieldset>
+          <label class="toggle"><input id="overwrite" type="checkbox"><span>覆盖同名文件</span></label>
+        </div>
+        <div class="actions">
+          <button class="secondary back" data-target="4">上一步</button>
+          <button id="execute" class="primary">开始拆分</button>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="6">
+        <div id="progress-panel" class="progress-panel" hidden aria-live="polite">
+          <div class="progress-heading">
+            <strong id="progress-message">准备开始</strong>
+            <span id="progress-percent">0%</span>
+          </div>
+          <progress id="execution-progress" max="100" value="0">0%</progress>
+        </div>
+        <div id="result-content" hidden>
+          <div class="summary-strip">
+            <div><strong id="result-count">0</strong><span>生成文件</span></div>
+            <div><strong id="discard-count">0</strong><span>空值行记录</span></div>
+            <div><strong id="unmatched-count">0</strong><span>未匹配行记录</span></div>
+            <div><strong id="error-count">0</strong><span>错误</span></div>
+          </div>
+          <div id="result-list" class="result-list"></div>
+          <div id="warning-list" class="warning-list"></div>
+        </div>
+        <div class="actions">
+          <button id="restart" class="secondary">处理另一个文件</button>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

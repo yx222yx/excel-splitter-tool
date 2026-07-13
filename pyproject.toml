@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "excel-splitter-tool"
+version = "0.1.0"
+description = "Local multi-sheet Excel splitter"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "Flask==3.1.3",
+    "openpyxl==3.1.5",
+    "pywebview==6.2.1",
+    "waitress==3.0.2",
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller==6.21.0",
+]
+
+[project.scripts]
+excel-splitter = "excel_splitter.cli:main"
+excel-splitter-web = "excel_splitter.web.app:main"
+excel-splitter-desktop = "excel_splitter.desktop:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"excel_splitter.web" = ["templates/*.html", "static/*.css", "static/*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
