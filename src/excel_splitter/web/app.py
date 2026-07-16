@@ -17,7 +17,7 @@ def create_app(config: dict | None = None) -> Flask:
     app.config.from_mapping(
         MAX_CONTENT_LENGTH=100 * 1024 * 1024,
         UPLOAD_DIR=generated_upload_dir,
-        DEFAULT_OUTPUT_DIR=project_root / "outputs",
+        DEFAULT_OUTPUT_DIR=Path.home() / "Desktop",
         JSON_AS_ASCII=False,
     )
     if config:

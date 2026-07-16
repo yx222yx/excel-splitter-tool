@@ -51,12 +51,16 @@ class SheetPreview:
         ]
 
 
-def list_sheet_names(input_file: Path) -> list[str]:
-    workbook, _ = load_workbook_with_warnings(input_file, read_only=True)
+def list_sheet_names(input_file: Path, *, workbook=None) -> list[str]:
+    should_close = False
+    if workbook is None:
+        workbook, _ = load_workbook_with_warnings(input_file, read_only=True)
+        should_close = True
     try:
         return list(workbook.sheetnames)
     finally:
-        workbook.close()
+        if should_close:
+            workbook.close()
 
 
 def preview_sheet(
@@ -65,14 +69,20 @@ def preview_sheet(
     *,
     start_row: int = 1,
     max_rows: int = 100,
+    workbook=None,
 ) -> SheetPreview:
     if start_row < 1:
         raise ValueError("预览起始行必须大于等于 1")
     if max_rows < 1 or max_rows > 500:
         raise ValueError("单次预览行数必须在 1 到 500 之间")
-    workbook, warning_messages = load_workbook_with_warnings(
-        input_file, data_only=True, read_only=True
-    )
+    should_close = False
+    if workbook is None:
+        workbook, warning_messages = load_workbook_with_warnings(
+            input_file, data_only=True, read_only=True
+        )
+        should_close = True
+    else:
+        warning_messages = []
     try:
         if sheet_name not in workbook.sheetnames:
             raise ValueError(f"找不到 sheet：{sheet_name}")
@@ -90,7 +100,8 @@ def preview_sheet(
             )
         )
     finally:
-        workbook.close()
+        if should_close:
+            workbook.close()
     return SheetPreview(
         sheet_name=sheet_name,
         rows=rows,

@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+import os
+import subprocess
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import date, datetime, time
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from typing import Any
 from uuid import uuid4
 
-from flask import Blueprint, current_app, jsonify, render_template, request, send_file, url_for
+from flask import Blueprint, current_app, jsonify, render_template, request, url_for
 
+from ..encryption import decrypt_file, encrypt_file, is_encrypted
 from ..engine import SplitEngine
+from ..excel_io import load_workbook_with_warnings
 from ..models import SheetConfig, SplitJob
 from ..planning import build_split_plan
-from ..preview import list_sheet_names, preview_sheet
+from ..preview import preview_sheet
 from .dialogs import choose_directory
 
 
@@ -36,22 +41,96 @@ def load_file():
     job_id = uuid4().hex
     stored_path = current_app.config["UPLOAD_DIR"] / f"{job_id}.xlsx"
     upload.save(stored_path)
+
+    source_dir = request.form.get("source_dir")
+
+    if is_encrypted(stored_path):
+        _jobs()[job_id] = {
+            "input_file": stored_path,
+            "original_name": Path(original_filename).stem,
+            "encrypted": True,
+            "source_dir": source_dir or "",
+        }
+        return jsonify(needs_password=True, job_id=job_id, filename=original_filename)
+
     try:
-        sheets = list_sheet_names(stored_path)
+        workbook, _ = load_workbook_with_warnings(stored_path, data_only=True)
+        sheets = list(workbook.sheetnames)
     except Exception:
         stored_path.unlink(missing_ok=True)
         raise ValueError("文件不是可读取的 .xlsx 工作簿")
+
+    if source_dir:
+        default_output_dir = str(
+            Path(source_dir) / f"{Path(original_filename).stem}_拆分结果"
+        )
+    else:
+        default_output_dir = str(current_app.config["DEFAULT_OUTPUT_DIR"])
 
     _jobs()[job_id] = {
         "input_file": stored_path,
         "original_name": Path(original_filename).stem,
         "results": [],
+        "_workbook": workbook,
+        "_workbook_lock": Lock(),
+        "encrypted": False,
     }
     return jsonify(
         job_id=job_id,
         filename=original_filename,
         sheets=sheets,
-        default_output_dir=str(current_app.config["DEFAULT_OUTPUT_DIR"]),
+        default_output_dir=default_output_dir,
+    )
+
+
+@api.post("/api/load-with-password")
+def load_with_password():
+    payload = _json_payload()
+    job_id = _required_text(payload, "job_id")
+    password = _required_text(payload, "password")
+    job = _get_job(job_id)
+    if not job.get("encrypted"):
+        raise ValueError("文件未加密，无需密码")
+
+    stored_path = Path(job["input_file"])
+    try:
+        decrypted = decrypt_file(stored_path, password)
+    except Exception:
+        raise ValueError("密码错误，无法解密文件")
+
+    decrypted_path = stored_path.with_suffix(".decrypted.xlsx")
+    with open(decrypted_path, "wb") as f:
+        f.write(decrypted.read())
+
+    try:
+        workbook, _ = load_workbook_with_warnings(decrypted_path, data_only=True)
+        sheets = list(workbook.sheetnames)
+    except Exception:
+        decrypted_path.unlink(missing_ok=True)
+        raise ValueError("解密后文件无法读取")
+
+    original_filename = Path(job["original_name"] + ".xlsx").name
+    job.update({
+        "input_file": decrypted_path,
+        "results": [],
+        "_workbook": workbook,
+        "_workbook_lock": Lock(),
+        "encrypted": False,
+    })
+
+    source_dir = job.get("source_dir", "")
+    if source_dir:
+        default_output_dir = str(
+            Path(source_dir) / f"{Path(original_filename).stem}_拆分结果"
+        )
+    else:
+        default_output_dir = str(current_app.config["DEFAULT_OUTPUT_DIR"])
+
+    return jsonify(
+        job_id=job_id,
+        filename=original_filename,
+        sheets=sheets,
+        default_output_dir=default_output_dir,
     )
 
 
@@ -59,12 +138,15 @@ def load_file():
 def preview():
     payload = _json_payload()
     job = _get_job(payload.get("job_id"))
-    result = preview_sheet(
-        job["input_file"],
-        _required_text(payload, "sheet_name"),
-        start_row=int(payload.get("start_row", 1)),
-        max_rows=int(payload.get("max_rows", 100)),
-    )
+    wb, lock = job.get("_workbook"), job.get("_workbook_lock")
+    with lock or nullcontext():
+        result = preview_sheet(
+            job["input_file"],
+            _required_text(payload, "sheet_name"),
+            start_row=int(payload.get("start_row", 1)),
+            max_rows=int(payload.get("max_rows", 100)),
+            workbook=wb,
+        )
     return jsonify(
         sheet_name=result.sheet_name,
         rows=[[_json_value(value) for value in row] for row in result.rows],
@@ -82,7 +164,9 @@ def split_values():
     payload = _json_payload()
     job = _get_job(payload.get("job_id"))
     configs = _sheet_configs(payload.get("sheet_configs"))
-    plan = build_split_plan(job["input_file"], configs)
+    wb, lock = job.get("_workbook"), job.get("_workbook_lock")
+    with lock or nullcontext():
+        plan = build_split_plan(job["input_file"], configs, workbook=wb)
     return jsonify(
         values=plan.values, empty_rows=plan.empty_rows, warnings=plan.warnings
     )
@@ -117,6 +201,8 @@ def execute():
         original_name=job_record["original_name"],
     )
     split_job.validate()
+    output_password = payload.get("output_password", "") or ""
+
     if bool(payload.get("background", False)):
         execution = job_record.get("execution")
         if execution and execution.get("status") in ("queued", "running"):
@@ -130,7 +216,7 @@ def execute():
         }
         Thread(
             target=_run_background_job,
-            args=(job_record, split_job),
+            args=(job_record, split_job, output_password),
             daemon=True,
         ).start()
         return (
@@ -144,8 +230,10 @@ def execute():
         )
 
     summary = SplitEngine().execute(split_job)
+    if output_password:
+        _encrypt_summary_outputs(summary, output_password)
     _store_results(job_record, summary)
-    return jsonify(_serialize_summary(job_id, summary))
+    return jsonify(_serialize_summary(summary))
 
 
 @api.get("/api/progress/<job_id>")
@@ -160,7 +248,7 @@ def execution_progress(job_id: str):
         "message": execution["message"],
     }
     if execution["status"] == "complete":
-        payload["result"] = _serialize_summary(job_id, execution["summary"])
+        payload["result"] = _serialize_summary(execution["summary"])
     elif execution["status"] == "failed":
         payload["error"] = execution["error"]
     return jsonify(payload)
@@ -179,7 +267,11 @@ def select_output_dir():
     return jsonify(selected=True, path=str(selected))
 
 
-def _run_background_job(job_record: dict[str, Any], split_job: SplitJob) -> None:
+def _run_background_job(
+    job_record: dict[str, Any],
+    split_job: SplitJob,
+    output_password: str = "",
+) -> None:
     execution = job_record["execution"]
 
     def update_progress(percent: int, message: str) -> None:
@@ -193,6 +285,8 @@ def _run_background_job(job_record: dict[str, Any], split_job: SplitJob) -> None
         summary = SplitEngine().execute(
             split_job, progress_callback=update_progress
         )
+        if output_password:
+            _encrypt_summary_outputs(summary, output_password)
         _store_results(job_record, summary)
         execution.update(
             status="complete",
@@ -208,6 +302,13 @@ def _run_background_job(job_record: dict[str, Any], split_job: SplitJob) -> None
         )
 
 
+def _encrypt_summary_outputs(summary, password: str) -> None:
+    """加密输出结果中的所有文件。"""
+    for result in summary.results:
+        for artifact in result.output_files:
+            encrypt_file(artifact.output_file, password)
+
+
 def _store_results(job_record: dict[str, Any], summary) -> None:
     job_record["results"] = [
         artifact.output_file
@@ -216,52 +317,32 @@ def _store_results(job_record: dict[str, Any], summary) -> None:
     ]
 
 
-def _serialize_summary(job_id: str, summary) -> dict[str, Any]:
+def _serialize_summary(summary) -> dict[str, Any]:
     result_payload = asdict(summary)
-    download_index = 0
     for result in result_payload["results"]:
         for artifact in result["output_files"]:
             artifact["output_file"] = str(artifact["output_file"])
-            artifact["download_url"] = url_for(
-                "excel_splitter.download",
-                job_id=job_id,
-                result_index=download_index,
-            )
-            download_index += 1
     return result_payload
 
 
-@api.get("/api/result/<job_id>")
-def result(job_id: str):
-    job = _get_job(job_id)
-    return jsonify(
-        files=[
-            {
-                "output_file": str(path),
-                "download_url": url_for(
-                    "excel_splitter.download", job_id=job_id, result_index=index
-                ),
-            }
-            for index, path in enumerate(job["results"])
-        ]
-    )
+@api.post("/api/action/open-file")
+def open_file():
+    payload = _json_payload()
+    path = Path(_required_text(payload, "path"))
+    if not path.is_file():
+        raise ValueError("文件不存在")
+    os.startfile(str(path))
+    return jsonify(ok=True)
 
 
-@api.get("/api/download/<job_id>/<int:result_index>")
-def download(job_id: str, result_index: int):
-    job = _get_job(job_id)
-    try:
-        output_file = job["results"][result_index]
-    except IndexError as exc:
-        raise ValueError("找不到导出文件") from exc
-    if not output_file.is_file():
-        raise ValueError("导出文件已不存在")
-    return send_file(
-        output_file,
-        as_attachment=True,
-        download_name=output_file.name,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+@api.post("/api/action/open-folder")
+def open_folder():
+    payload = _json_payload()
+    path = Path(_required_text(payload, "path"))
+    if not path.is_file():
+        raise ValueError("文件不存在")
+    subprocess.Popen(["explorer", "/select,", str(path)])
+    return jsonify(ok=True)
 
 
 def _jobs() -> dict[str, dict[str, Any]]:

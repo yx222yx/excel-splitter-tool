@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "excel-splitter-tool"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local multi-sheet Excel splitter"
 requires-python = ">=3.11,<3.12"
 dependencies = [
@@ -12,6 +12,7 @@ dependencies = [
     "openpyxl==3.1.5",
     "pywebview==6.2.1",
     "waitress==3.0.2",
+    "msoffcrypto-tool>=6.0.0",
 ]
 
 [project.optional-dependencies]

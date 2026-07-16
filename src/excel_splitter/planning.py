@@ -22,7 +22,10 @@ class SplitPlan:
 
 
 def build_split_plan(
-    input_file: Path, sheet_configs: Iterable[SheetConfig]
+    input_file: Path,
+    sheet_configs: Iterable[SheetConfig],
+    *,
+    workbook=None,
 ) -> SplitPlan:
     configs = tuple(sheet_configs)
     for config in configs:
@@ -33,9 +36,14 @@ def build_split_plan(
     if any(config.mode == "linked" for config in configs) and not reference_count:
         raise ValueError("按关联键匹配时必须选择一个基准 Sheet")
 
-    workbook, warning_messages = load_workbook_with_warnings(
-        input_file, data_only=True, read_only=True
-    )
+    should_close = False
+    if workbook is None:
+        workbook, warning_messages = load_workbook_with_warnings(
+            input_file, data_only=True, read_only=True
+        )
+        should_close = True
+    else:
+        warning_messages = []
     try:
         for config in configs:
             _validate_sheet_config(workbook, config)
@@ -51,7 +59,8 @@ def build_split_plan(
             return SplitPlan(values=[COMPLETE_COPY_VALUE], warnings=warning_messages)
         return _direct_plan(workbook, direct_configs, warning_messages)
     finally:
-        workbook.close()
+        if should_close:
+            workbook.close()
 
 
 def _validate_sheet_config(workbook, config: SheetConfig) -> None:

@@ -13,8 +13,7 @@ ERROR_ALREADY_EXISTS = 183
 
 
 def user_output_dir() -> Path:
-    profile = Path(os.environ.get("USERPROFILE", Path.home()))
-    return profile / "Documents" / "Excel拆分工具输出"
+    return Path.home() / "Desktop"
 
 
 def log_file_path() -> Path:

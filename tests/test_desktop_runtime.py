@@ -12,7 +12,7 @@ def test_user_paths_use_writable_windows_locations(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("USERPROFILE", str(profile))
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
 
-    assert user_output_dir() == profile / "Documents" / "Excel拆分工具输出"
+    assert user_output_dir() == profile / "Desktop"
     assert log_file_path() == local_app_data / "ExcelSplitter" / "logs" / "excel-splitter.log"
 
 

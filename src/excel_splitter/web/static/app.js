@@ -53,25 +53,77 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+let pendingPasswordJobId = null;
+
 byId("load-file").addEventListener("click", async () => {
   const file = byId("excel-file").files[0];
   if (!file) return showAlert("请选择 .xlsx 文件");
   const form = new FormData();
   form.append("file", file);
+  if (file.path) {
+    const sep = file.path.includes("/") ? "/" : "\\";
+    form.append("source_dir", file.path.substring(0, file.path.lastIndexOf(sep)));
+  }
   try {
     const payload = await api("/api/load", { method: "POST", body: form });
-    Object.assign(state, { jobId: payload.job_id, filename: payload.filename, sheets: payload.sheets, previews: {}, values: [], maxStep: 2 });
-    byId("file-status").textContent = `已加载：${payload.filename} · ${payload.sheets.length} 个 Sheet`;
-    byId("file-status").classList.add("loaded");
-    byId("output-dir").value = payload.default_output_dir;
-    byId("sheet-list").innerHTML = payload.sheets.map((name) => `<label class="check-item"><input type="checkbox" value="${escapeHtml(name)}"><span>${escapeHtml(name)}</span></label>`).join("");
-    goStep(2);
+    if (payload.needs_password) {
+      pendingPasswordJobId = payload.job_id;
+      byId("password-modal-filename").textContent = payload.filename;
+      byId("password-input").value = "";
+      byId("password-modal").classList.add("open");
+      byId("password-input").focus();
+      return;
+    }
+    finishLoad(payload);
   } catch (error) { showAlert(error.message); }
 });
+
+byId("password-confirm").addEventListener("click", async () => {
+  const password = byId("password-input").value;
+  if (!password) return;
+  try {
+    const payload = await api("/api/load-with-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: pendingPasswordJobId, password }),
+    });
+    byId("password-modal").classList.remove("open");
+    pendingPasswordJobId = null;
+    finishLoad(payload);
+  } catch (error) {
+    showAlert(error.message);
+    byId("password-input").value = "";
+    byId("password-input").focus();
+  }
+});
+
+byId("password-cancel").addEventListener("click", () => {
+  byId("password-modal").classList.remove("open");
+  pendingPasswordJobId = null;
+});
+
+byId("password-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") byId("password-confirm").click();
+});
+
+function finishLoad(payload) {
+  Object.assign(state, { jobId: payload.job_id, filename: payload.filename, sheets: payload.sheets, previews: {}, values: [], maxStep: 2 });
+  byId("file-status").textContent = `已加载：${payload.filename} · ${payload.sheets.length} 个 Sheet`;
+  byId("file-status").classList.add("loaded");
+  byId("output-dir").value = payload.default_output_dir;
+  byId("sheet-list").innerHTML = payload.sheets.map((name) => `<label class="check-item"><input type="checkbox" value="${escapeHtml(name)}"><span>${escapeHtml(name)}</span></label>`).join("");
+  goStep(2);
+}
 
 function selectedSheets() {
   return [...byId("sheet-list").querySelectorAll("input:checked")].map((input) => input.value);
 }
+
+byId("select-all-sheets").addEventListener("change", (event) => {
+  byId("sheet-list").querySelectorAll("input").forEach((input) => {
+    input.checked = event.target.checked;
+  });
+});
 
 byId("configure-sheets").addEventListener("click", async () => {
   const selected = selectedSheets();
@@ -96,7 +148,7 @@ function renderSheetConfigs(selected) {
     const preview = state.previews[name];
     preview.loading = false;
     const headerOptions = Array.from({ length: Math.min(15, preview.total_rows) }, (_, rowIndex) => rowIndex + 1).map((row) => `<option value="${row}" ${row === preview.suggested_header_row ? "selected" : ""}>第 ${row} 行</option>`).join("");
-    const modeOptions = `<option value="full">不拆分，完整保留</option><option value="reference">作为基准 Sheet</option><option value="linked">按关联键匹配</option><option value="direct" selected>直接按本 Sheet 字段拆分</option>`;
+    const modeOptions = `<option value="full" selected>不拆分，完整保留</option><option value="reference">作为基准 Sheet</option><option value="linked">按关联键匹配</option><option value="direct">直接按本 Sheet 字段拆分</option>`;
     const table = renderPreviewRows(preview.rows, preview.start_row);
     return `<article class="sheet-config" data-sheet="${escapeHtml(name)}" data-index="${index}"><h2>${escapeHtml(name)}</h2><div class="config-controls"><label>处理方式<select class="sheet-mode">${modeOptions}</select></label><label>表头行<select class="header-row">${headerOptions}</select></label><label class="split-column-control">拆分字段<select class="split-column"></select></label><label class="key-column-control">关联键字段<select class="key-column"></select></label></div><div class="preview-meta">已加载 <span class="loaded-rows">${preview.end_row}</span> / ${preview.total_rows} 行</div><div class="preview-wrap"><table class="preview-table"><tbody>${table}</tbody></table></div></article>`;
   }).join("");
@@ -215,17 +267,10 @@ byId("load-values").addEventListener("click", async () => {
   } catch (error) { showAlert(error.message); }
 });
 
-document.querySelectorAll('input[name="split-mode"]').forEach((input) => input.addEventListener("change", () => {
-  const manual = document.querySelector('input[name="split-mode"]:checked').value === "selected";
-  byId("value-toolbar").hidden = !manual;
-  byId("split-values").classList.toggle("disabled", !manual);
-  byId("split-values").querySelectorAll("input").forEach((item) => { item.disabled = !manual; });
-}));
 byId("select-all-values").addEventListener("click", () => byId("split-values").querySelectorAll("input").forEach((input) => { input.checked = true; }));
 byId("clear-values").addEventListener("click", () => byId("split-values").querySelectorAll("input").forEach((input) => { input.checked = false; }));
 byId("to-output").addEventListener("click", () => {
-  const mode = document.querySelector('input[name="split-mode"]:checked').value;
-  if (mode === "selected" && !byId("split-values").querySelector("input:checked")) return showAlert("手动模式下至少选择一个拆分值");
+  if (!byId("split-values").querySelector("input:checked")) return showAlert("至少选择一个拆分值");
   state.maxStep = Math.max(state.maxStep, 5);
   goStep(5);
 });
@@ -246,20 +291,26 @@ byId("browse-output-dir").addEventListener("click", async () => {
   }
 });
 
+byId("output-encrypt").addEventListener("change", (event) => {
+  byId("output-password-group").hidden = !event.target.checked;
+});
+
 byId("execute").addEventListener("click", async () => {
-  const mode = document.querySelector('input[name="split-mode"]:checked').value;
   const selectedValues = [...byId("split-values").querySelectorAll("input:checked")].map((input) => input.value);
   const outputTypes = [...document.querySelectorAll('input[name="output-type"]:checked')].map((input) => input.value);
   if (!outputTypes.length) return showAlert("至少选择一种输出版本");
   try {
     const configs = sheetConfigs();
     validateSheetConfigs(configs);
+    const encryptChecked = byId("output-encrypt").checked;
+    const outputPassword = encryptChecked ? byId("output-password").value : "";
+    if (encryptChecked && !outputPassword) return showAlert("请输入加密密码");
     state.maxStep = 6;
     state.executing = true;
     goStep(6);
     prepareProgress();
     setBusy(true, "拆分任务执行中");
-    const started = await api("/api/execute", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ job_id: state.jobId, sheet_configs: configs, split_mode: mode, selected_split_values: selectedValues, output_types: outputTypes, output_dir: byId("output-dir").value, filename_template: byId("filename-template").value, overwrite: byId("overwrite").checked, background: true }) }, false);
+    const started = await api("/api/execute", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ job_id: state.jobId, sheet_configs: configs, split_mode: "selected", selected_split_values: selectedValues, output_types: outputTypes, output_dir: byId("output-dir").value, filename_template: byId("filename-template").value, overwrite: byId("overwrite").checked, background: true, output_password: outputPassword }) }, false);
     await pollExecution(started.progress_url);
   } catch (error) {
     updateProgress(0, "拆分失败");
@@ -313,13 +364,29 @@ function renderResults(payload) {
     }).join("");
     const files = result.output_files.map((artifact) => {
       const outputLabel = artifact.output_type === "formula" ? "公式版" : "结果值版";
-      return `<div class="result-item"><strong>${outputLabel}</strong><span class="result-path">${escapeHtml(artifact.output_file)}</span><a class="download" href="${artifact.download_url}">下载</a></div>`;
+      return `<div class="result-item"><strong>${outputLabel}</strong><span class="result-path">${escapeHtml(artifact.output_file)}</span><button class="btn-action" data-action="open-file" data-path="${escapeHtml(artifact.output_file)}">打开文件</button><button class="btn-action" data-action="open-folder" data-path="${escapeHtml(artifact.output_file)}">打开所在文件夹</button></div>`;
     }).join("");
     return `<section class="result-group"><h2>${escapeHtml(result.split_value)}</h2><div class="result-stats">${stats}</div>${files}</section>`;
   }).join("");
   const messages = [...payload.warnings, ...payload.errors];
   byId("warning-list").innerHTML = messages.map((message) => `<div>${escapeHtml(message)}</div>`).join("");
 }
+
+byId("result-list").addEventListener("click", async (event) => {
+  const button = event.target.closest(".btn-action");
+  if (!button) return;
+  const action = button.dataset.action;
+  const path = button.dataset.path;
+  try {
+    await api(`/api/action/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }, false);
+  } catch (error) {
+    showAlert(error.message);
+  }
+});
 
 document.querySelectorAll(".back").forEach((button) => button.addEventListener("click", () => goStep(Number(button.dataset.target))));
 document.querySelectorAll(".step").forEach((button) => button.addEventListener("click", () => goStep(Number(button.dataset.step))));

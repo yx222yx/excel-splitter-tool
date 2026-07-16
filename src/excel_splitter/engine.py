@@ -109,6 +109,7 @@ class SplitEngine:
             sheet_rows: dict[str, int] = {}
             discarded_empty_rows: dict[str, int] = {}
             unmatched_key_rows: dict[str, int] = {}
+            kept_rows_per_sheet: dict[str, list[int]] = {}
             config_count = len(job.sheet_configs)
             for config_index, config in enumerate(job.sheet_configs):
                 sheet = (
@@ -133,7 +134,7 @@ class SplitEngine:
                     unmatched = 0
                     report_rows(kept, kept)
                 elif config.mode == "linked":
-                    kept, discarded, unmatched = _filter_linked_sheet(
+                    kept, discarded, unmatched, kept_original = _filter_linked_sheet(
                         sheet,
                         value_sheet,
                         config,
@@ -141,14 +142,21 @@ class SplitEngine:
                         plan.all_keys,
                         report_rows,
                     )
+                    kept_rows_per_sheet[config.sheet_name] = kept_original
                 else:
-                    kept, discarded = _filter_sheet(
+                    kept, discarded, kept_original = _filter_sheet(
                         sheet, value_sheet, config, split_value, report_rows
                     )
                     unmatched = 0
+                    kept_rows_per_sheet[config.sheet_name] = kept_original
                 sheet_rows[config.sheet_name] = kept
                 discarded_empty_rows[config.sheet_name] = discarded
                 unmatched_key_rows[config.sheet_name] = unmatched
+
+            if formula_workbook is not None:
+                _fix_formula_references(
+                    formula_workbook, job.sheet_configs, kept_rows_per_sheet
+                )
 
             available_outputs = {
                 "formula": ("公式版", formula_workbook),
@@ -203,9 +211,10 @@ def _filter_sheet(
     config: SheetConfig,
     split_value: str,
     progress: Callable[[int, int], None] | None = None,
-) -> tuple[int, int]:
+) -> tuple[int, int, list[int]]:
     kept = 0
     discarded_empty = 0
+    kept_original_rows: list[int] = []
     total = max(0, value_sheet.max_row - config.header_row)
     for processed, row_index in enumerate(
         range(value_sheet.max_row, config.header_row, -1), start=1
@@ -224,9 +233,10 @@ def _filter_sheet(
             value_sheet.delete_rows(row_index, 1)
         else:
             kept += 1
+            kept_original_rows.append(row_index)
         if progress is not None and (processed % 25 == 0 or processed == total):
             progress(processed, total)
-    return kept, discarded_empty
+    return kept, discarded_empty, kept_original_rows
 
 
 def _filter_linked_sheet(
@@ -236,10 +246,11 @@ def _filter_linked_sheet(
     target_keys: set[str],
     all_keys: set[str],
     progress: Callable[[int, int], None] | None = None,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, list[int]]:
     kept = 0
     discarded_empty = 0
     unmatched = 0
+    kept_original_rows: list[int] = []
     total = max(0, value_sheet.max_row - config.header_row)
     for processed, row_index in enumerate(
         range(value_sheet.max_row, config.header_row, -1), start=1
@@ -254,6 +265,7 @@ def _filter_linked_sheet(
             value_sheet.delete_rows(row_index, 1)
         elif key in target_keys:
             kept += 1
+            kept_original_rows.append(row_index)
         else:
             if key not in all_keys:
                 unmatched += 1
@@ -262,7 +274,44 @@ def _filter_linked_sheet(
             value_sheet.delete_rows(row_index, 1)
         if progress is not None and (processed % 25 == 0 or processed == total):
             progress(processed, total)
-    return kept, discarded_empty, unmatched
+    return kept, discarded_empty, unmatched, kept_original_rows
+
+
+def _fix_formula_references(
+    workbook,
+    sheet_configs: tuple[SheetConfig, ...],
+    kept_rows_per_sheet: dict[str, list[int]],
+) -> None:
+    """修正 delete_rows 后偏移行的公式引用。
+
+    从底向上删除行时，被保留的数据行可能因上方行的删除而向上移位，
+    但 openpyxl 的 delete_rows 不会自动重写公式文本。
+    此函数逐 cell 计算偏移量并调用 Translator 修正公式中的引用。
+    """
+    from openpyxl.formula.translate import Translator
+
+    for config in sheet_configs:
+        sheet_name = config.sheet_name
+        kept_original = kept_rows_per_sheet.get(sheet_name)
+        if not kept_original:
+            continue
+        kept_original.sort()
+        ws = workbook[sheet_name]
+        for data_index, orig_row in enumerate(kept_original):
+            new_row = config.header_row + 1 + data_index
+            if orig_row == new_row:
+                continue  # 行号没变，无需修正
+            offset = new_row - orig_row  # 负数 = 向上移位
+            for col_index in range(1, ws.max_column + 1):
+                cell = ws.cell(row=new_row, column=col_index)
+                if isinstance(cell.value, str) and cell.value.startswith("="):
+                    try:
+                        translated = Translator(
+                            cell.value, cell.coordinate
+                        ).translate_formula(row_delta=offset, col_delta=0)
+                        cell.value = translated
+                    except Exception:
+                        pass  # 翻译失败则保留原公式
 
 
 class _ProgressReporter:

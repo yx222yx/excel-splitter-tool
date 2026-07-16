@@ -1,4 +1,5 @@
 from io import BytesIO
+from pathlib import Path
 import time
 
 from openpyxl import load_workbook
@@ -100,9 +101,9 @@ def test_web_workflow_loads_configures_and_executes(sample_workbook, tmp_path):
     output.close()
 
     for output_file in result["results"][0]["output_files"]:
-        downloaded = client.get(output_file["download_url"])
-        assert downloaded.status_code == 200
-        assert downloaded.mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        assert "download_url" not in output_file
+        assert Path(output_file["output_file"]).is_file()
+        assert output_file["output_type"] in ("formula", "values")
 
 
 def test_web_returns_json_error_for_invalid_extension(tmp_path):
@@ -218,7 +219,9 @@ def test_frontend_exposes_all_sheet_processing_modes(tmp_path):
     script = client.get("/static/app.js").get_data(as_text=True)
     styles = client.get("/static/app.css").get_data(as_text=True)
 
-    assert 'value="full"' in script
+    assert 'value="full" selected' in script
+    assert 'id="select-all-sheets"' in page
+    assert "全选" in page
     assert 'value="reference"' in script
     assert 'value="linked"' in script
     assert 'value="direct"' in script
@@ -227,13 +230,25 @@ def test_frontend_exposes_all_sheet_processing_modes(tmp_path):
     assert ".config-controls label[hidden]" in styles
     assert "splitColumn.disabled = !usesSplitColumn" in script
     assert "Math.min(15, preview.total_rows)" in script
+    assert 'class="btn-action"' in script
+    assert '"open-file"' in script
+    assert '"open-folder"' in script
+    assert "打开文件" in script
+    assert "打开所在文件夹" in script
+    assert "加密输出文件" in page
+    assert 'id="output-encrypt"' in page
+    assert 'id="output-password"' in page
+    assert 'id="password-modal"' in page
+    assert 'id="password-input"' in page
+    assert "文件已加密" in page
+    assert "output_password" in script
     assert 'id="browse-output-dir"' in page
     assert 'id="execution-progress"' in page
     assert 'name="output-type" value="formula"' in page
     assert 'name="output-type" value="values"' in page
     assert 'id="selected-file-size"' in page
-    assert "background: true" in script
     assert "output_types" in script
+    assert 'id="value-toolbar"' in page
     assert ".sheet-config { min-width: 0;" in styles
     assert ".preview-wrap { width: 100%; max-width: 100%; overflow: auto;" in styles
 

@@ -44,6 +44,7 @@
       </section>
 
       <section class="panel" data-panel="2">
+        <div class="select-all-bar"><label><input type="checkbox" id="select-all-sheets"> 全选</label></div>
         <div id="sheet-list" class="check-list"></div>
         <div class="actions">
           <button class="secondary back" data-target="1">上一步</button>
@@ -60,11 +61,7 @@
       </section>
 
       <section class="panel" data-panel="4">
-        <div class="segmented" role="radiogroup" aria-label="拆分模式">
-          <label><input type="radio" name="split-mode" value="all" checked>全部值</label>
-          <label><input type="radio" name="split-mode" value="selected">手动勾选</label>
-        </div>
-        <div id="value-toolbar" class="value-toolbar" hidden>
+        <div id="value-toolbar" class="value-toolbar">
           <button id="select-all-values" class="secondary small">全选</button>
           <button id="clear-values" class="secondary small">清空</button>
         </div>
@@ -86,6 +83,8 @@
               <label><input type="checkbox" name="output-type" value="values" checked><span>结果值版</span></label>
             </div>
           </fieldset>
+          <label class="toggle"><input id="output-encrypt" type="checkbox"><span>加密输出文件</span></label>
+          <label id="output-password-group" hidden>加密密码<span class="input-action"><input id="output-password" type="password" placeholder="请输入加密密码"></span></label>
           <label class="toggle"><input id="overwrite" type="checkbox"><span>覆盖同名文件</span></label>
         </div>
         <div class="actions">
@@ -117,6 +116,17 @@
         </div>
       </section>
     </main>
+  </div>
+  <div id="password-modal" class="modal-overlay" hidden>
+    <div class="modal-dialog">
+      <h2>文件已加密</h2>
+      <p id="password-modal-filename" class="muted"></p>
+      <label>请输入文件密码<span class="input-action"><input id="password-input" type="password" placeholder="请输入密码"></span></label>
+      <div class="modal-actions">
+        <button id="password-cancel" class="secondary">取消</button>
+        <button id="password-confirm" class="primary">确认</button>
+      </div>
+    </div>
   </div>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
