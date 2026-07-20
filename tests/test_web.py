@@ -4,6 +4,8 @@ import time
 
 from openpyxl import load_workbook
 
+import excel_splitter.web.routes as routes_module
+from excel_splitter.models import SplitSummary
 from excel_splitter.web.app import create_app
 
 
@@ -379,3 +381,64 @@ def test_web_background_execute_reports_progress(sample_workbook, tmp_path):
     assert snapshots[-1]["progress"] == 100
     assert snapshots[-1]["message"]
     assert snapshots[-1]["result"]["total_files"] == 1
+
+def test_web_reuses_cached_plan_only_for_matching_configs(
+    sample_workbook, tmp_path, monkeypatch
+):
+    app = _app(tmp_path)
+    client = app.test_client()
+    with sample_workbook.open("rb") as source:
+        loaded = client.post(
+            "/api/load",
+            data={"file": (BytesIO(source.read()), "data.xlsx")},
+            content_type="multipart/form-data",
+        )
+    job_id = loaded.get_json()["job_id"]
+    configs = [
+        {
+            "sheet_name": "人员",
+            "header_row": 2,
+            "split_column_idx": 1,
+            "split_column_label": "A - 部门",
+            "mode": "direct",
+        }
+    ]
+    values = client.post(
+        "/api/split-values",
+        json={"job_id": job_id, "sheet_configs": configs},
+    )
+    assert values.status_code == 200
+    record = app.extensions["excel_splitter_jobs"][job_id]
+    cached_plan = record["_split_plan"]
+
+    plans = []
+
+    def capture_execute(self, job, progress_callback=None, plan=None):
+        plans.append(plan)
+        return SplitSummary(
+            results=[],
+            total_files=0,
+            total_discarded=0,
+        )
+
+    monkeypatch.setattr(routes_module.SplitEngine, "execute", capture_execute)
+    payload = {
+        "job_id": job_id,
+        "sheet_configs": configs,
+        "split_mode": "selected",
+        "selected_split_values": ["临床部"],
+        "output_types": ["values"],
+        "output_dir": str(tmp_path / "out"),
+    }
+
+    same = client.post("/api/execute", json=payload)
+    assert same.status_code == 200
+    assert plans[-1] is cached_plan
+
+    changed_configs = [{**configs[0], "split_column_label": "changed"}]
+    changed = client.post(
+        "/api/execute",
+        json={**payload, "sheet_configs": changed_configs},
+    )
+    assert changed.status_code == 200
+    assert plans[-1] is None

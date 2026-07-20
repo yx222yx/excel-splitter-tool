@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import os
+from copy import copy
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from io import BytesIO
 from pathlib import Path
+from threading import Lock
 from typing import Callable, Iterable
 
 from .excel_io import load_workbook_with_warnings
@@ -10,54 +15,162 @@ from .planning import SplitPlan, build_split_plan
 from .values import normalize_split_value
 
 
+EMPTY_ROW_STOP_THRESHOLD = 10000
 ProgressCallback = Callable[[int, str], None]
+DEFAULT_PROCESS_WORKERS = 2
+MAX_PROCESS_WORKERS = 3
+
+
+def _select_process_workers(
+    value_count: int,
+    requested: int | None,
+) -> int:
+    if value_count <= 1:
+        return 1
+    if requested is None:
+        raw = os.environ.get("EXCEL_SPLITTER_WORKERS", "").strip()
+        try:
+            requested = int(raw) if raw else DEFAULT_PROCESS_WORKERS
+        except ValueError:
+            requested = DEFAULT_PROCESS_WORKERS
+    available_cpus = max(1, os.cpu_count() or 1)
+    return max(
+        1,
+        min(value_count, requested, MAX_PROCESS_WORKERS, available_cpus),
+    )
+
+
+def _export_value_worker(
+    job: SplitJob,
+    split_value: str,
+    plan: SplitPlan,
+    file_bytes: bytes,
+) -> SplitResult:
+    engine = SplitEngine(process_workers=1)
+    return engine._export_value(
+        job,
+        split_value,
+        plan,
+        lambda _fraction, _message: None,
+        file_bytes=file_bytes,
+    )
 
 
 class SplitEngine:
+    def __init__(self, process_workers: int | None = None) -> None:
+        self.process_workers = process_workers
+
     def execute(
         self,
         job: SplitJob,
         progress_callback: ProgressCallback | None = None,
+        plan: SplitPlan | None = None,
     ) -> SplitSummary:
         progress = _ProgressReporter(progress_callback)
         progress.update(0, "正在分析工作簿")
         job.validate()
-        plan = build_split_plan(job.input_file, job.sheet_configs)
+
+        def report_plan_progress(percent: int, message: str) -> None:
+            progress.update(min(4, round(percent * 4 / 100)), message)
+
+        if plan is None:
+            plan = build_split_plan(
+                job.input_file, job.sheet_configs,
+                progress_callback=report_plan_progress,
+            )
         target_values = self._target_values(job, plan.values)
         if not target_values:
             raise ValueError("没有可用于拆分的非空值")
         progress.update(5, f"已识别 {len(target_values)} 个拆分值")
 
         job.output_dir.mkdir(parents=True, exist_ok=True)
-        results: list[SplitResult] = []
+        n = len(target_values)
         errors: list[str] = []
         all_warnings = list(plan.warnings)
+        lock = Lock()
 
-        for value_index, split_value in enumerate(target_values):
-            range_start = 5 + (value_index * 93 / len(target_values))
-            range_end = 5 + ((value_index + 1) * 93 / len(target_values))
+        # 文件只读一次，传给所有并行 worker 共享
+        with open(job.input_file, "rb") as f:
+            file_bytes = f.read()
 
-            def report_value(fraction: float, message: str) -> None:
-                absolute = range_start + (range_end - range_start) * fraction
-                progress.update(round(absolute), message)
+        # 预分配结果列表，按顺序填入
+        results: list[SplitResult | None] = [None] * n
+        worker_progress = [0.0] * n
 
+        def report_worker_progress(idx: int, fraction: float, message: str) -> None:
+            clipped = max(0.0, min(1.0, fraction))
+            with lock:
+                worker_progress[idx] = max(worker_progress[idx], clipped)
+                pct = 5 + int(sum(worker_progress) * 90 / n)
+                progress.update(pct, f"{message} ({idx + 1}/{n})")
+
+        def mark_worker_done(idx: int) -> None:
+            with lock:
+                worker_progress[idx] = 1.0
+                completed = sum(1 for item in worker_progress if item >= 1.0)
+                pct = 5 + int(sum(worker_progress) * 90 / n)
+                message = f"正在拆分 ({completed}/{n})"
+                progress.update(pct, message)
+
+        def process_one(idx: int, sv: str) -> None:
             try:
-                result = self._export_value(job, split_value, plan, report_value)
-            except Exception as exc:  # Continue other values and report the failed one.
-                errors.append(f"{split_value}: {exc}")
-                continue
-            results.append(result)
-            all_warnings.extend(result.warnings)
+                r = self._export_value(
+                    job,
+                    sv,
+                    plan,
+                    lambda fraction, message: report_worker_progress(
+                        idx, fraction, message
+                    ),
+                    file_bytes=file_bytes,
+                )
+                with lock:
+                    results[idx] = r
+                    all_warnings.extend(r.warnings)
+            except Exception as exc:
+                with lock:
+                    errors.append(f"{sv}: {exc}")
+            finally:
+                mark_worker_done(idx)
 
+        workers = _select_process_workers(n, self.process_workers)
+        use_processes = workers > 1 and type(self) is SplitEngine
+        if use_processes:
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                future_jobs = {}
+                for idx, split_value in enumerate(target_values):
+                    report_worker_progress(idx, 0.02, f"正在加载 {split_value}")
+                    future = pool.submit(
+                        _export_value_worker,
+                        job,
+                        split_value,
+                        plan,
+                        file_bytes,
+                    )
+                    future_jobs[future] = (idx, split_value)
+                for future in as_completed(future_jobs):
+                    idx, split_value = future_jobs[future]
+                    try:
+                        result = future.result()
+                        results[idx] = result
+                        all_warnings.extend(result.warnings)
+                    except Exception as exc:
+                        errors.append(f"{split_value}: {exc}")
+                    finally:
+                        mark_worker_done(idx)
+        else:
+            for idx, split_value in enumerate(target_values):
+                process_one(idx, split_value)
+
+        ordered = [r for r in results if r is not None]
         unique_warnings = tuple(dict.fromkeys(all_warnings))
         summary = SplitSummary(
-            results=results,
-            total_files=sum(len(result.output_files) for result in results),
+            results=ordered,
+            total_files=sum(len(r.output_files) for r in ordered),
             total_discarded=sum(
-                sum(result.discarded_empty_rows.values()) for result in results
+                sum(r.discarded_empty_rows.values()) for r in ordered
             ),
             total_unmatched=sum(
-                sum(result.unmatched_key_rows.values()) for result in results
+                sum(r.unmatched_key_rows.values()) for r in ordered
             ),
             warnings=list(unique_warnings),
             errors=errors,
@@ -80,19 +193,25 @@ class SplitEngine:
         split_value: str,
         plan: SplitPlan,
         progress: Callable[[float, str], None],
+        *,
+        file_bytes: bytes | None = None,
     ) -> SplitResult:
         progress(0.02, f"正在加载 {split_value}")
         formula_workbook = None
-        warning_messages: list[str] = []
-        if "formula" in job.output_types:
-            formula_workbook, formula_warnings = load_workbook_with_warnings(
-                job.input_file, data_only=False
-            )
-            warning_messages.extend(formula_warnings)
         value_workbook = None
+        warning_messages: list[str] = []
+        need_both = "formula" in job.output_types
         try:
+            if file_bytes is None:
+                with open(job.input_file, "rb") as f:
+                    file_bytes = f.read()
+            if need_both:
+                formula_workbook, formula_warnings = load_workbook_with_warnings(
+                    BytesIO(file_bytes), data_only=False
+                )
+                warning_messages.extend(formula_warnings)
             value_workbook, value_warnings = load_workbook_with_warnings(
-                job.input_file, data_only=True
+                BytesIO(file_bytes), data_only=True
             )
             warning_messages = list(
                 dict.fromkeys([*warning_messages, *value_warnings])
@@ -148,6 +267,10 @@ class SplitEngine:
                         sheet, value_sheet, config, split_value, report_rows
                     )
                     unmatched = 0
+                if config.mode != "full":
+                    _compact_filtered_sheet(value_sheet, config, kept_original)
+                    if sheet is not None:
+                        _compact_filtered_sheet(sheet, config, kept_original)
                     kept_rows_per_sheet[config.sheet_name] = kept_original
                 sheet_rows[config.sheet_name] = kept
                 discarded_empty_rows[config.sheet_name] = discarded
@@ -205,6 +328,70 @@ class SplitEngine:
         )
 
 
+def _effective_last_data_row(value_sheet, header_row: int) -> int:
+    cells = getattr(value_sheet, "_cells", None)
+    if isinstance(cells, dict):
+        last_data_row = header_row
+        for key, cell in cells.items():
+            row_index = key[0]
+            if row_index > header_row and normalize_split_value(cell.value) is not None:
+                last_data_row = max(last_data_row, row_index)
+        return last_data_row
+
+    max_column = getattr(value_sheet, "max_column", 1)
+    last_data_row = header_row
+    consecutive_empty = 0
+    for row_index in range(header_row + 1, value_sheet.max_row + 1):
+        has_value = any(
+            normalize_split_value(value_sheet.cell(row=row_index, column=column).value)
+            is not None
+            for column in range(1, max_column + 1)
+        )
+        if has_value:
+            last_data_row = row_index
+            consecutive_empty = 0
+        else:
+            consecutive_empty += 1
+            if consecutive_empty >= EMPTY_ROW_STOP_THRESHOLD:
+                break
+    return last_data_row
+
+
+def _add_delete_range(
+    ranges: list[tuple[int, int]],
+    pending: tuple[int, int] | None,
+    row_index: int,
+) -> tuple[int, int]:
+    if pending is None:
+        return (row_index, row_index)
+    start, end = pending
+    if row_index == start - 1:
+        return (row_index, end)
+    ranges.append(pending)
+    return (row_index, row_index)
+
+
+def _flush_delete_range(
+    ranges: list[tuple[int, int]], pending: tuple[int, int] | None
+) -> None:
+    if pending is not None:
+        ranges.append(pending)
+
+
+def _delete_rows_both(sheet, value_sheet, start: int, amount: int) -> None:
+    if amount <= 0:
+        return
+    if sheet is not None and start <= sheet.max_row:
+        sheet.delete_rows(start, min(amount, sheet.max_row - start + 1))
+    if start <= value_sheet.max_row:
+        value_sheet.delete_rows(start, min(amount, value_sheet.max_row - start + 1))
+
+
+def _delete_row_ranges(sheet, value_sheet, ranges: list[tuple[int, int]]) -> None:
+    for start, end in ranges:
+        _delete_rows_both(sheet, value_sheet, start, end - start + 1)
+
+
 def _filter_sheet(
     sheet,
     value_sheet,
@@ -215,27 +402,38 @@ def _filter_sheet(
     kept = 0
     discarded_empty = 0
     kept_original_rows: list[int] = []
-    total = max(0, value_sheet.max_row - config.header_row)
+    assert config.split_column_idx is not None
+    original_max_row = value_sheet.max_row
+    effective_last_row = _effective_last_data_row(value_sheet, config.header_row)
+    total = max(0, effective_last_row - config.header_row)
+    delete_ranges: list[tuple[int, int]] = []
+    pending_delete: tuple[int, int] | None = None
+    if effective_last_row < original_max_row:
+        delete_ranges.append((effective_last_row + 1, original_max_row))
     for processed, row_index in enumerate(
-        range(value_sheet.max_row, config.header_row, -1), start=1
+        range(effective_last_row, config.header_row, -1), start=1
     ):
         normalized = normalize_split_value(
             value_sheet.cell(row=row_index, column=config.split_column_idx).value
         )
         if normalized is None:
             discarded_empty += 1
-            if sheet is not None:
-                sheet.delete_rows(row_index, 1)
-            value_sheet.delete_rows(row_index, 1)
+            pending_delete = _add_delete_range(
+                delete_ranges, pending_delete, row_index
+            )
         elif normalized != split_value:
-            if sheet is not None:
-                sheet.delete_rows(row_index, 1)
-            value_sheet.delete_rows(row_index, 1)
+            pending_delete = _add_delete_range(
+                delete_ranges, pending_delete, row_index
+            )
         else:
+            _flush_delete_range(delete_ranges, pending_delete)
+            pending_delete = None
             kept += 1
             kept_original_rows.append(row_index)
         if progress is not None and (processed % 25 == 0 or processed == total):
             progress(processed, total)
+    _flush_delete_range(delete_ranges, pending_delete)
+    _delete_row_ranges(sheet, value_sheet, delete_ranges)
     return kept, discarded_empty, kept_original_rows
 
 
@@ -251,30 +449,90 @@ def _filter_linked_sheet(
     discarded_empty = 0
     unmatched = 0
     kept_original_rows: list[int] = []
-    total = max(0, value_sheet.max_row - config.header_row)
+    assert config.key_column_idx is not None
+    original_max_row = value_sheet.max_row
+    effective_last_row = _effective_last_data_row(value_sheet, config.header_row)
+    total = max(0, effective_last_row - config.header_row)
+    delete_ranges: list[tuple[int, int]] = []
+    pending_delete: tuple[int, int] | None = None
+    if effective_last_row < original_max_row:
+        delete_ranges.append((effective_last_row + 1, original_max_row))
     for processed, row_index in enumerate(
-        range(value_sheet.max_row, config.header_row, -1), start=1
+        range(effective_last_row, config.header_row, -1), start=1
     ):
         key = normalize_split_value(
             value_sheet.cell(row=row_index, column=config.key_column_idx).value
         )
         if key is None:
             discarded_empty += 1
-            if sheet is not None:
-                sheet.delete_rows(row_index, 1)
-            value_sheet.delete_rows(row_index, 1)
+            pending_delete = _add_delete_range(
+                delete_ranges, pending_delete, row_index
+            )
         elif key in target_keys:
+            _flush_delete_range(delete_ranges, pending_delete)
+            pending_delete = None
             kept += 1
             kept_original_rows.append(row_index)
         else:
             if key not in all_keys:
                 unmatched += 1
-            if sheet is not None:
-                sheet.delete_rows(row_index, 1)
-            value_sheet.delete_rows(row_index, 1)
+            pending_delete = _add_delete_range(
+                delete_ranges, pending_delete, row_index
+            )
         if progress is not None and (processed % 25 == 0 or processed == total):
             progress(processed, total)
+    _flush_delete_range(delete_ranges, pending_delete)
+    _delete_row_ranges(sheet, value_sheet, delete_ranges)
     return kept, discarded_empty, unmatched, kept_original_rows
+def _compact_filtered_sheet(
+    sheet,
+    config: SheetConfig,
+    kept_original_rows: Iterable[int],
+) -> None:
+    from openpyxl.utils.cell import get_column_letter, range_boundaries
+    from openpyxl.worksheet.dimensions import DimensionHolder, RowDimension
+
+    kept_rows = sorted(kept_original_rows)
+    row_mapping = [
+        *((row_index, row_index) for row_index in range(1, config.header_row + 1)),
+        *(
+            (original_row, config.header_row + offset)
+            for offset, original_row in enumerate(kept_rows, start=1)
+        ),
+    ]
+    source_dimensions = sheet.row_dimensions
+    compact_dimensions = DimensionHolder(
+        worksheet=sheet,
+        default_factory=lambda: RowDimension(sheet),
+    )
+    for original_row, compact_row in row_mapping:
+        if original_row not in source_dimensions:
+            continue
+        dimension = copy(source_dimensions[original_row])
+        dimension.index = compact_row
+        compact_dimensions[compact_row] = dimension
+    sheet.row_dimensions = compact_dimensions
+
+    last_row = max(config.header_row, sheet.max_row)
+
+    def trim_ref(ref: str | None) -> str | None:
+        if not ref:
+            return ref
+        min_col, min_row, max_col, max_row = range_boundaries(ref)
+        if max_row <= last_row or min_row > last_row:
+            return ref
+        return (
+            f"{get_column_letter(min_col)}{min_row}:"
+            f"{get_column_letter(max_col)}{last_row}"
+        )
+
+    sheet.auto_filter.ref = trim_ref(sheet.auto_filter.ref)
+    for table in sheet.tables.values():
+        table.ref = trim_ref(table.ref)
+        if table.autoFilter is not None:
+            table.autoFilter.ref = trim_ref(table.autoFilter.ref)
+
+
 
 
 def _fix_formula_references(
@@ -297,21 +555,25 @@ def _fix_formula_references(
             continue
         kept_original.sort()
         ws = workbook[sheet_name]
-        for data_index, orig_row in enumerate(kept_original):
-            new_row = config.header_row + 1 + data_index
-            if orig_row == new_row:
-                continue  # 行号没变，无需修正
-            offset = new_row - orig_row  # 负数 = 向上移位
-            for col_index in range(1, ws.max_column + 1):
-                cell = ws.cell(row=new_row, column=col_index)
-                if isinstance(cell.value, str) and cell.value.startswith("="):
-                    try:
-                        translated = Translator(
-                            cell.value, cell.coordinate
-                        ).translate_formula(row_delta=offset, col_delta=0)
-                        cell.value = translated
-                    except Exception:
-                        pass  # 翻译失败则保留原公式
+        original_by_compact_row = {
+            config.header_row + data_index: original_row
+            for data_index, original_row in enumerate(kept_original, start=1)
+        }
+        cells = getattr(ws, "_cells", {})
+        for (row_index, _column_index), cell in cells.items():
+            original_row = original_by_compact_row.get(row_index)
+            if original_row is None or original_row == row_index:
+                continue
+            if not (isinstance(cell.value, str) and cell.value.startswith("=")):
+                continue
+            offset = row_index - original_row
+            try:
+                cell.value = Translator(cell.value, cell.coordinate).translate_formula(
+                    row_delta=offset, col_delta=0
+                )
+            except Exception:
+                pass
+
 
 
 class _ProgressReporter:

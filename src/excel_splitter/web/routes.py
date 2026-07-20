@@ -16,7 +16,7 @@ from ..encryption import decrypt_file, encrypt_file, is_encrypted
 from ..engine import SplitEngine
 from ..excel_io import load_workbook_with_warnings
 from ..models import SheetConfig, SplitJob
-from ..planning import build_split_plan
+from ..planning import SplitPlan, build_split_plan
 from ..preview import preview_sheet
 from .dialogs import choose_directory
 
@@ -167,6 +167,8 @@ def split_values():
     wb, lock = job.get("_workbook"), job.get("_workbook_lock")
     with lock or nullcontext():
         plan = build_split_plan(job["input_file"], configs, workbook=wb)
+    job["_split_plan"] = plan
+    job["_split_plan_configs"] = configs
     return jsonify(
         values=plan.values, empty_rows=plan.empty_rows, warnings=plan.warnings
     )
@@ -187,10 +189,11 @@ def execute():
         output_types = tuple(raw_output_types)
     else:
         raise ValueError("输出版本必须是列表")
+    configs = _sheet_configs(payload.get("sheet_configs"))
     split_job = SplitJob(
         input_file=job_record["input_file"],
         output_dir=output_dir,
-        sheet_configs=_sheet_configs(payload.get("sheet_configs")),
+        sheet_configs=configs,
         split_mode=payload.get("split_mode", "all"),
         selected_split_values=tuple(payload.get("selected_split_values") or ()),
         filename_template=payload.get(
@@ -202,6 +205,11 @@ def execute():
     )
     split_job.validate()
     output_password = payload.get("output_password", "") or ""
+    cached_plan = (
+        job_record.get("_split_plan")
+        if job_record.get("_split_plan_configs") == configs
+        else None
+    )
 
     if bool(payload.get("background", False)):
         execution = job_record.get("execution")
@@ -216,7 +224,7 @@ def execute():
         }
         Thread(
             target=_run_background_job,
-            args=(job_record, split_job, output_password),
+            args=(job_record, split_job, output_password, cached_plan),
             daemon=True,
         ).start()
         return (
@@ -229,7 +237,7 @@ def execute():
             202,
         )
 
-    summary = SplitEngine().execute(split_job)
+    summary = SplitEngine().execute(split_job, plan=cached_plan)
     if output_password:
         _encrypt_summary_outputs(summary, output_password)
     _store_results(job_record, summary)
@@ -271,6 +279,7 @@ def _run_background_job(
     job_record: dict[str, Any],
     split_job: SplitJob,
     output_password: str = "",
+    plan: SplitPlan | None = None,
 ) -> None:
     execution = job_record["execution"]
 
@@ -283,7 +292,7 @@ def _run_background_job(
 
     try:
         summary = SplitEngine().execute(
-            split_job, progress_callback=update_progress
+            split_job, progress_callback=update_progress, plan=plan
         )
         if output_password:
             _encrypt_summary_outputs(summary, output_password)

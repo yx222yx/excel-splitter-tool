@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from logging.handlers import RotatingFileHandler
+from multiprocessing import freeze_support
 from pathlib import Path
 from threading import Thread
 from typing import Any, Callable
@@ -166,6 +167,7 @@ def _show_message(title: str, message: str, *, error: bool = False) -> None:
 
 
 def main() -> int:
+    freeze_support()
     instance = SingleInstance(MUTEX_NAME)
     try:
         configure_logging()

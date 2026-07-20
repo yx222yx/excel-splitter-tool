@@ -202,3 +202,33 @@ def test_run_window_stops_server_when_window_creation_fails():
         run_window(server, webview_module=FailingWebview())
 
     assert server.stopped is True
+
+def test_main_calls_freeze_support_before_desktop_initialization(monkeypatch):
+    from excel_splitter import desktop
+
+    calls = []
+
+    class FakeInstance:
+        def acquire(self):
+            calls.append("acquire")
+            return False
+
+        def release(self):
+            calls.append("release")
+
+    monkeypatch.setattr(
+        desktop,
+        "freeze_support",
+        lambda: calls.append("freeze_support"),
+        raising=False,
+    )
+    monkeypatch.setattr(desktop, "SingleInstance", lambda _name: FakeInstance())
+    monkeypatch.setattr(
+        desktop,
+        "configure_logging",
+        lambda: calls.append("configure_logging"),
+    )
+    monkeypatch.setattr(desktop, "_show_message", lambda *_args, **_kwargs: None)
+
+    assert desktop.main() == 0
+    assert calls[0] == "freeze_support"

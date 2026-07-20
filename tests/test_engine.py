@@ -1,9 +1,29 @@
 from pathlib import Path
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.worksheet.table import Table
 
-from excel_splitter.engine import SplitEngine
-from excel_splitter.models import SheetConfig, SplitJob
+import excel_splitter.engine as engine_module
+from excel_splitter.engine import SplitEngine, _filter_linked_sheet, _filter_sheet
+from excel_splitter.models import SheetConfig, SplitJob, SplitResult
+
+
+class _Cell:
+    def __init__(self, value):
+        self.value = value
+
+
+class _RecordingSheet:
+    def __init__(self, max_row: int, values_by_row: dict[int, str | None]):
+        self.max_row = max_row
+        self.values_by_row = values_by_row
+        self.deleted_rows: list[tuple[int, int]] = []
+
+    def cell(self, row: int, column: int):
+        return _Cell(self.values_by_row.get(row))
+
+    def delete_rows(self, idx: int, amount: int = 1) -> None:
+        self.deleted_rows.append((idx, amount))
 
 
 def _output_file(result, output_type: str):
@@ -245,3 +265,328 @@ def test_engine_reports_monotonic_progress_to_completion(sample_workbook, tmp_pa
     assert percentages[-1] == 100
     assert percentages == sorted(percentages)
     assert all(message for _, message in events)
+
+
+def test_filter_sheet_reaches_real_rows_above_virtual_empty_tail():
+    sheet = _RecordingSheet(
+        max_row=10006,
+        values_by_row={2: "A", 3: "B", 4: "A"},
+    )
+    config = SheetConfig("Data", 1, 1)
+
+    kept, _discarded, kept_rows = _filter_sheet(None, sheet, config, "A")
+
+    assert kept == 2
+    assert set(kept_rows) == {2, 4}
+
+
+def test_filter_sheet_batches_contiguous_direct_deletions():
+    values = {row: "B" for row in range(2, 102)}
+    values[102] = "A"
+    sheet = _RecordingSheet(max_row=102, values_by_row=values)
+    config = SheetConfig("Data", 1, 1)
+
+    kept, _discarded, kept_rows = _filter_sheet(None, sheet, config, "A")
+
+    assert kept == 1
+    assert kept_rows == [102]
+    assert sheet.deleted_rows == [(2, 100)]
+
+
+def test_filter_linked_sheet_reaches_real_rows_above_virtual_empty_tail():
+    sheet = _RecordingSheet(
+        max_row=10006,
+        values_by_row={2: "A", 3: "B", 4: "A"},
+    )
+    config = SheetConfig("Detail", 1, None, mode="linked", key_column_idx=1)
+
+    kept, _discarded, _unmatched, kept_rows = _filter_linked_sheet(
+        None, sheet, config, {"A"}, {"A", "B"}
+    )
+
+    assert kept == 2
+    assert set(kept_rows) == {2, 4}
+
+
+def test_filter_linked_sheet_batches_contiguous_deletions():
+    values = {row: "B" for row in range(2, 102)}
+    values[102] = "A"
+    sheet = _RecordingSheet(max_row=102, values_by_row=values)
+    config = SheetConfig("Detail", 1, None, mode="linked", key_column_idx=1)
+
+    kept, _discarded, _unmatched, kept_rows = _filter_linked_sheet(
+        None, sheet, config, {"A"}, {"A", "B"}
+    )
+
+    assert kept == 1
+    assert kept_rows == [102]
+    assert sheet.deleted_rows == [(2, 100)]
+
+
+def test_engine_maps_large_plan_progress_without_percent_regression(tmp_path):
+    path = tmp_path / "large.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["Group"])
+    for row_index in range(1, 2101):
+        sheet.append(["A" if row_index % 2 else "B"])
+    workbook.save(path)
+    workbook.close()
+
+    events = []
+    job = SplitJob(
+        input_file=path,
+        output_dir=tmp_path / "out",
+        sheet_configs=(SheetConfig("Data", 1, 1),),
+        split_mode="selected",
+        selected_split_values=("A",),
+        output_types=("values",),
+    )
+
+    SplitEngine().execute(
+        job,
+        progress_callback=lambda percent, message: events.append(
+            (percent, message)
+        ),
+    )
+
+    percentages = [percent for percent, _message in events]
+    assert percentages == sorted(percentages)
+
+
+def test_engine_reports_worker_progress_before_first_value_finishes(tmp_path):
+    path = tmp_path / "progress.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["Group"])
+    sheet.append(["A"])
+    sheet.append(["B"])
+    workbook.save(path)
+    workbook.close()
+
+    class ReportingEngine(SplitEngine):
+        def _export_value(self, job, split_value, plan, progress, **_kwargs):
+            progress(0.25, f"inner {split_value}")
+            return SplitResult(
+                split_value=split_value,
+                output_files=[],
+                sheet_rows={},
+                discarded_empty_rows={},
+                unmatched_key_rows={},
+                warnings=[],
+            )
+
+    events = []
+    job = SplitJob(
+        input_file=path,
+        output_dir=tmp_path / "out",
+        sheet_configs=(SheetConfig("Data", 1, 1),),
+        split_mode="selected",
+        selected_split_values=("A", "B"),
+        output_types=("values",),
+    )
+
+    ReportingEngine().execute(
+        job,
+        progress_callback=lambda percent, message: events.append(
+            (percent, message)
+        ),
+    )
+
+    assert any(5 < percent < 50 for percent, _message in events)
+
+
+def test_compact_filtered_sheet_moves_row_metadata_and_trims_ranges():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["Group", "Name", "Amount"])
+    sheet.append(["A", "First", 1])
+    sheet.append(["B", "Removed", 2])
+    sheet.append(["A", "Second", 3])
+    sheet.row_dimensions[2].height = 22
+    sheet.row_dimensions[3].height = 33
+    sheet.row_dimensions[4].height = 44
+    for row_index in range(5, 101):
+        sheet.row_dimensions[row_index]
+    sheet.auto_filter.ref = "A1:C100"
+    sheet.add_table(Table(displayName="DataTable", ref="A1:C100"))
+    config = SheetConfig("Data", 1, 1)
+
+    _kept, _discarded, kept_rows = _filter_sheet(
+        None, sheet, config, "A"
+    )
+    engine_module._compact_filtered_sheet(sheet, config, kept_rows)
+
+    assert sheet.max_row == 3
+    assert max(sheet.row_dimensions) == 3
+    assert sheet.row_dimensions[2].height == 22
+    assert sheet.row_dimensions[3].height == 44
+    assert sheet.auto_filter.ref == "A1:C3"
+    assert sheet.tables["DataTable"].ref == "A1:C3"
+    workbook.close()
+
+def test_engine_compacts_filtered_sheet_metadata_before_save(tmp_path):
+    input_file = tmp_path / "metadata.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["Group", "Name", "Amount"])
+    sheet.append(["A", "First", 1])
+    sheet.append(["B", "Removed", 2])
+    sheet.append(["A", "Second", 3])
+    sheet.row_dimensions[2].height = 22
+    sheet.row_dimensions[3].height = 33
+    sheet.row_dimensions[4].height = 44
+    for row_index in range(5, 101):
+        sheet.row_dimensions[row_index]
+    sheet.auto_filter.ref = "A1:C100"
+    sheet.add_table(Table(displayName="DataTable", ref="A1:C100"))
+    workbook.save(input_file)
+    workbook.close()
+
+    job = SplitJob(
+        input_file=input_file,
+        output_dir=tmp_path / "out",
+        sheet_configs=(SheetConfig("Data", 1, 1),),
+        split_mode="selected",
+        selected_split_values=("A",),
+        output_types=("values",),
+    )
+    summary = SplitEngine().execute(job)
+
+    output = load_workbook(_output_file(summary.results[0], "values"))
+    compact = output["Data"]
+    assert compact.max_row == 3
+    assert max(compact.row_dimensions) == 3
+    assert compact.row_dimensions[2].height == 22
+    assert compact.row_dimensions[3].height == 44
+    assert compact.auto_filter.ref == "A1:C3"
+    assert compact.tables["DataTable"].ref == "A1:C3"
+    output.close()
+
+
+def test_fix_formula_references_does_not_scan_max_column_for_each_row(monkeypatch):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet["A1"] = "Formula"
+    sheet["A2"] = "=B4*2"
+    config = SheetConfig("Data", 1, 1)
+    worksheet_type = type(sheet)
+
+    def fail_max_column(_sheet):
+        raise AssertionError("max_column should not be accessed")
+
+    monkeypatch.setattr(
+        worksheet_type,
+        "max_column",
+        property(fail_max_column),
+    )
+
+    engine_module._fix_formula_references(
+        workbook,
+        (config,),
+        {"Data": [4]},
+    )
+
+    assert sheet["A2"].value == "=B2*2"
+    workbook.close()
+
+
+def test_engine_uses_supplied_plan_without_rebuilding(
+    sample_workbook, tmp_path, monkeypatch
+):
+    job = _job(sample_workbook, tmp_path / "out", mode="selected")
+    plan = engine_module.build_split_plan(
+        job.input_file,
+        job.sheet_configs,
+    )
+
+    def fail_build(*_args, **_kwargs):
+        raise AssertionError("plan should be reused")
+
+    monkeypatch.setattr(engine_module, "build_split_plan", fail_build)
+
+    summary = SplitEngine().execute(job, plan=plan)
+
+    assert summary.errors == []
+    assert summary.results[0].split_value == job.selected_split_values[0]
+
+
+def test_select_process_workers_is_conservative(monkeypatch):
+    monkeypatch.delenv("EXCEL_SPLITTER_WORKERS", raising=False)
+    monkeypatch.setattr(engine_module.os, "cpu_count", lambda: 8)
+
+    assert engine_module._select_process_workers(1, None) == 1
+    assert engine_module._select_process_workers(10, None) == 2
+    assert engine_module._select_process_workers(10, 3) == 3
+    assert engine_module._select_process_workers(2, 9) == 2
+
+
+def test_engine_process_pool_preserves_split_value_order(tmp_path, monkeypatch):
+    input_file = tmp_path / "parallel.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["Group"])
+    sheet.append(["A"])
+    sheet.append(["B"])
+    workbook.save(input_file)
+    workbook.close()
+
+    submitted_workers = []
+
+    class FakeFuture:
+        def __init__(self, result):
+            self._result = result
+
+        def result(self):
+            return self._result
+
+    class FakeExecutor:
+        def __init__(self, max_workers):
+            submitted_workers.append(max_workers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def submit(self, function, *args):
+            return FakeFuture(function(*args))
+
+    def fake_export(_job, split_value, _plan, _file_bytes):
+        return SplitResult(
+            split_value=split_value,
+            output_files=[],
+            sheet_rows={},
+            discarded_empty_rows={},
+            unmatched_key_rows={},
+            warnings=[],
+        )
+
+    monkeypatch.setattr(engine_module, "ProcessPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(engine_module, "_export_value_worker", fake_export)
+    monkeypatch.setattr(
+        engine_module,
+        "as_completed",
+        lambda futures: reversed(futures),
+    )
+    job = SplitJob(
+        input_file=input_file,
+        output_dir=tmp_path / "out",
+        sheet_configs=(SheetConfig("Data", 1, 1),),
+        split_mode="all",
+        output_types=("values",),
+    )
+    plan = engine_module.SplitPlan(values=["A", "B"])
+
+    summary = SplitEngine(process_workers=2).execute(job, plan=plan)
+
+    assert submitted_workers == [2]
+    assert [result.split_value for result in summary.results] == ["A", "B"]
+    assert summary.errors == []

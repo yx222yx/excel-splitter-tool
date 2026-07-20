@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .excel_io import load_workbook_with_warnings
 from .models import SheetConfig
@@ -10,6 +10,8 @@ from .values import normalize_split_value
 
 
 COMPLETE_COPY_VALUE = "完整表"
+
+ProgressCallback = Callable[[int, str], None]
 
 
 @dataclass(slots=True)
@@ -26,6 +28,7 @@ def build_split_plan(
     sheet_configs: Iterable[SheetConfig],
     *,
     workbook=None,
+    progress_callback: ProgressCallback | None = None,
 ) -> SplitPlan:
     configs = tuple(sheet_configs)
     for config in configs:
@@ -57,7 +60,7 @@ def build_split_plan(
         direct_configs = [config for config in configs if config.mode == "direct"]
         if not direct_configs:
             return SplitPlan(values=[COMPLETE_COPY_VALUE], warnings=warning_messages)
-        return _direct_plan(workbook, direct_configs, warning_messages)
+        return _direct_plan(workbook, direct_configs, warning_messages, progress_callback)
     finally:
         if should_close:
             workbook.close()
@@ -116,21 +119,69 @@ def _reference_plan(sheet, config: SheetConfig, warnings: list[str]) -> SplitPla
     )
 
 
-def _direct_plan(workbook, configs: list[SheetConfig], warnings: list[str]) -> SplitPlan:
+def _direct_plan(
+    workbook,
+    configs: list[SheetConfig],
+    warnings: list[str],
+    progress_callback: ProgressCallback | None = None,
+) -> SplitPlan:
     values: list[str] = []
     seen: set[str] = set()
     empty_rows: dict[str, int] = {}
+    MAX_EMPTY_ROWS = 10000  # 连续空行上限，超出则视为后续无数据
     for config in configs:
         sheet = workbook[config.sheet_name]
-        empty_count = 0
-        for row_index in range(config.header_row + 1, sheet.max_row + 1):
-            value = normalize_split_value(
-                sheet.cell(row=row_index, column=config.split_column_idx).value
+        total_rows = sheet.max_row - config.header_row
+
+        if total_rows <= 0:
+            empty_rows[config.sheet_name] = 0
+            continue
+
+        if total_rows > 50000:
+            warnings.append(
+                f"{config.sheet_name} 行数较多（{sheet.max_row} 行），"
+                f"扫描可能需要较长时间，请耐心等待"
             )
+
+        empty_count = 0
+        consecutive_empty = 0
+        stopped_early = False
+        if progress_callback:
+            progress_callback(0, f"正在分析 {config.sheet_name}...")
+
+        for row_index, row in enumerate(
+            sheet.iter_rows(
+                min_row=config.header_row + 1,
+                max_row=sheet.max_row,
+                min_col=config.split_column_idx,
+                max_col=config.split_column_idx,
+                values_only=True,
+            ),
+            start=1,
+        ):
+            value = normalize_split_value(row[0])
             if value is None:
                 empty_count += 1
-            elif value not in seen:
-                seen.add(value)
-                values.append(value)
+                consecutive_empty += 1
+                if consecutive_empty >= MAX_EMPTY_ROWS:
+                    actual_end = config.header_row + row_index
+                    stopped_early = True
+                    break
+            else:
+                consecutive_empty = 0
+                if value not in seen:
+                    seen.add(value)
+                    values.append(value)
+            if progress_callback and row_index % 2000 == 0:
+                progress_callback(
+                    int(min(row_index / total_rows * 100, 99)),
+                    f"正在分析 {config.sheet_name} ({row_index}/{total_rows})",
+                )
+
+        if stopped_early:
+            warnings.append(
+                f"{config.sheet_name} 在行 {actual_end} 之后连续 {MAX_EMPTY_ROWS} 行为空，"
+                f"已提前结束扫描，后续空行将被忽略"
+            )
         empty_rows[config.sheet_name] = empty_count
     return SplitPlan(values=values, empty_rows=empty_rows, warnings=warnings)
