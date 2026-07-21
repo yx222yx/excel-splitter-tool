@@ -20,6 +20,8 @@ class SplitPlan:
     keys_by_value: dict[str, set[str]] = field(default_factory=dict)
     all_keys: set[str] = field(default_factory=set)
     empty_rows: dict[str, int] = field(default_factory=dict)
+    # 每个 sheet 的表区结构：[(块表头行, 块数据首行, 块数据末行), ...]，块 1 为主表
+    blocks: dict[str, list[tuple[int, int, int]]] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -51,19 +53,67 @@ def build_split_plan(
         for config in configs:
             _validate_sheet_config(workbook, config)
 
+        blocks = {
+            config.sheet_name: _detect_blocks(workbook[config.sheet_name], config.header_row)
+            for config in configs
+        }
+
         reference = next(
             (config for config in configs if config.mode == "reference"), None
         )
         if reference is not None:
-            return _reference_plan(workbook[reference.sheet_name], reference, warning_messages)
+            plan = _reference_plan(workbook[reference.sheet_name], reference, warning_messages)
+            plan.blocks = blocks
+            return plan
 
         direct_configs = [config for config in configs if config.mode == "direct"]
         if not direct_configs:
-            return SplitPlan(values=[COMPLETE_COPY_VALUE], warnings=warning_messages)
-        return _direct_plan(workbook, direct_configs, warning_messages, progress_callback)
+            return SplitPlan(values=[COMPLETE_COPY_VALUE], blocks=blocks, warnings=warning_messages)
+        plan = _direct_plan(workbook, direct_configs, warning_messages, progress_callback)
+        plan.blocks = blocks
+        return plan
     finally:
         if should_close:
             workbook.close()
+
+
+def _detect_blocks(sheet, header_row: int) -> list[tuple[int, int, int]]:
+    """把表头行之下的数据区按「整行全空」切成若干块。
+
+    块 1 = 主表（表头行 + 其下连续非空行）；每个空行之后若还有非空行则开始
+    新块，块首行视为块表头。返回 [(块表头行, 块数据首行, 块数据末行), ...]，
+    单表区 sheet 只有块 1。检测用读到的值（调用方保证 data_only 口径一致）。
+    """
+    max_row = sheet.max_row or header_row
+    segments: list[tuple[int, int]] = []
+    segment_start: int | None = None
+    last_non_empty = header_row
+    consecutive_empty = 0
+    EMPTY_GAP_STOP = 10000  # 连续空行上限，超出视为后续无数据
+    for row_index, row in enumerate(
+        sheet.iter_rows(min_row=header_row + 1, max_row=max_row, values_only=True),
+        start=header_row + 1,
+    ):
+        if all(normalize_split_value(value) is None for value in row):
+            consecutive_empty += 1
+            if consecutive_empty >= EMPTY_GAP_STOP:
+                break
+            if segment_start is not None:
+                segments.append((segment_start, last_non_empty))
+                segment_start = None
+        else:
+            consecutive_empty = 0
+            if segment_start is None:
+                segment_start = row_index
+            last_non_empty = row_index
+    if segment_start is not None:
+        segments.append((segment_start, last_non_empty))
+    if not segments:
+        return [(header_row, header_row + 1, header_row)]
+    blocks = [(header_row, header_row + 1, segments[0][1])]
+    for start, end in segments[1:]:
+        blocks.append((start, start + 1, end))
+    return blocks
 
 
 def _validate_sheet_config(workbook, config: SheetConfig) -> None:

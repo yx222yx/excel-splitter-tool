@@ -170,8 +170,42 @@ def split_values():
     job["_split_plan"] = plan
     job["_split_plan_configs"] = configs
     return jsonify(
-        values=plan.values, empty_rows=plan.empty_rows, warnings=plan.warnings
+        values=plan.values,
+        empty_rows=plan.empty_rows,
+        warnings=plan.warnings,
+        blocks=_serialize_blocks(plan, wb),
     )
+
+
+def _serialize_blocks(plan, workbook) -> dict[str, list[dict]]:
+    """把 plan 里的表区结构转成前端可展示的块信息（只返回 ≥2 块的 sheet）。"""
+    result: dict[str, list[dict]] = {}
+    for sheet_name, blocks in plan.blocks.items():
+        if len(blocks) < 2:
+            continue
+        sheet = workbook[sheet_name] if workbook is not None else None
+        result[sheet_name] = [
+            {
+                "header_row": block_header,
+                "data_start": data_start,
+                "data_end": data_end,
+                "header_preview": _block_header_preview(sheet, block_header),
+            }
+            for block_header, data_start, data_end in blocks
+        ]
+    return result
+
+
+def _block_header_preview(sheet, block_header: int) -> str:
+    if sheet is None:
+        return ""
+    values = []
+    for cell in sheet[block_header]:
+        if cell.value is not None and str(cell.value).strip():
+            values.append(str(cell.value).strip())
+        if len(values) >= 3:
+            break
+    return " / ".join(values)
 
 
 @api.post("/api/execute")
@@ -386,6 +420,7 @@ def _sheet_configs(raw_configs: Any) -> tuple[SheetConfig, ...]:
         if not isinstance(raw, dict):
             raise ValueError("sheet 配置格式无效")
         try:
+            raw_strategies = raw.get("block_strategies")
             config = SheetConfig(
                 sheet_name=str(raw["sheet_name"]),
                 header_row=int(raw["header_row"]),
@@ -394,6 +429,11 @@ def _sheet_configs(raw_configs: Any) -> tuple[SheetConfig, ...]:
                 mode=str(raw.get("mode", "direct")),
                 key_column_idx=_optional_int(raw.get("key_column_idx")),
                 key_column_label=str(raw.get("key_column_label", "")),
+                block_strategies=(
+                    tuple(str(item) for item in raw_strategies)
+                    if isinstance(raw_strategies, list)
+                    else ()
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("sheet 配置缺少有效的表头行或拆分列") from exc

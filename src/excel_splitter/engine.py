@@ -260,11 +260,17 @@ class SplitEngine:
                         plan.keys_by_value.get(split_value, set()),
                         plan.all_keys,
                         report_rows,
+                        blocks=plan.blocks.get(config.sheet_name),
                     )
                     kept_rows_per_sheet[config.sheet_name] = kept_original
                 else:
                     kept, discarded, kept_original = _filter_sheet(
-                        sheet, value_sheet, config, split_value, report_rows
+                        sheet,
+                        value_sheet,
+                        config,
+                        split_value,
+                        report_rows,
+                        blocks=plan.blocks.get(config.sheet_name),
                     )
                     unmatched = 0
                 if config.mode != "full":
@@ -398,7 +404,20 @@ def _filter_sheet(
     config: SheetConfig,
     split_value: str,
     progress: Callable[[int, int], None] | None = None,
+    blocks: list[tuple[int, int, int]] | None = None,
 ) -> tuple[int, int, list[int]]:
+    if blocks and len(blocks) > 1:
+        kept, discarded_empty, _unmatched, kept_original_rows = _filter_blocks(
+            sheet,
+            value_sheet,
+            config,
+            blocks,
+            key_column_idx=config.split_column_idx,
+            matches=lambda key: key == split_value,
+            unmatched_check=None,
+            progress=progress,
+        )
+        return kept, discarded_empty, kept_original_rows
     kept = 0
     discarded_empty = 0
     kept_original_rows: list[int] = []
@@ -444,7 +463,19 @@ def _filter_linked_sheet(
     target_keys: set[str],
     all_keys: set[str],
     progress: Callable[[int, int], None] | None = None,
+    blocks: list[tuple[int, int, int]] | None = None,
 ) -> tuple[int, int, int, list[int]]:
+    if blocks and len(blocks) > 1:
+        return _filter_blocks(
+            sheet,
+            value_sheet,
+            config,
+            blocks,
+            key_column_idx=config.key_column_idx,
+            matches=lambda key: key in target_keys,
+            unmatched_check=lambda key: key not in all_keys,
+            progress=progress,
+        )
     kept = 0
     discarded_empty = 0
     unmatched = 0
@@ -484,6 +515,115 @@ def _filter_linked_sheet(
     _flush_delete_range(delete_ranges, pending_delete)
     _delete_row_ranges(sheet, value_sheet, delete_ranges)
     return kept, discarded_empty, unmatched, kept_original_rows
+
+
+def _filter_blocks(
+    sheet,
+    value_sheet,
+    config: SheetConfig,
+    blocks: list[tuple[int, int, int]],
+    *,
+    key_column_idx: int | None,
+    matches: Callable[[str], bool],
+    unmatched_check: Callable[[str], bool] | None,
+    progress: Callable[[int, int], None] | None = None,
+) -> tuple[int, int, int, list[int]]:
+    """多表区 sheet 的按块过滤。
+
+    块 1（主表）行为与单行过滤一致；块 2..n 按策略处理：follow 按同样的键
+    匹配，块内有幸存数据行才保留块表头；keep 整块保留；drop 整块删除（与
+    不匹配行一样不计入统计）。幸存块之间保留一个空行作为分隔。
+    """
+    assert key_column_idx is not None
+    strategies = config.block_strategies
+    original_max_row = value_sheet.max_row
+    effective_last_row = _effective_last_data_row(value_sheet, config.header_row)
+    total = max(0, effective_last_row - config.header_row)
+    delete_rows: set[int] = set()
+    if effective_last_row < original_max_row:
+        delete_rows.update(range(effective_last_row + 1, original_max_row + 1))
+    kept = 0
+    discarded_empty = 0
+    unmatched = 0
+    kept_original_rows: list[int] = []
+    survived: list[bool] = []
+    processed = 0
+    for block_index, (block_header, data_start, data_end) in enumerate(blocks):
+        strategy = (
+            "follow"
+            if block_index == 0
+            else strategies[block_index - 1]
+            if block_index - 1 < len(strategies)
+            else "follow"
+        )
+        if strategy == "keep":
+            if block_index > 0:
+                kept_original_rows.append(block_header)
+            for row_index in range(data_start, data_end + 1):
+                kept += 1
+                kept_original_rows.append(row_index)
+                processed += 1
+            survived.append(True)
+            continue
+        if strategy == "drop":
+            if block_index > 0:
+                delete_rows.add(block_header)
+            delete_rows.update(range(data_start, data_end + 1))
+            processed += max(0, data_end - data_start + 1)
+            survived.append(False)
+            continue
+        block_kept = 0
+        for row_index in range(data_start, data_end + 1):
+            key = normalize_split_value(
+                value_sheet.cell(row=row_index, column=key_column_idx).value
+            )
+            if key is None:
+                discarded_empty += 1
+                delete_rows.add(row_index)
+            elif matches(key):
+                kept += 1
+                block_kept += 1
+                kept_original_rows.append(row_index)
+            else:
+                if unmatched_check is not None and unmatched_check(key):
+                    unmatched += 1
+                delete_rows.add(row_index)
+            processed += 1
+            if progress is not None and (processed % 25 == 0 or processed == total):
+                progress(processed, total)
+        if block_index == 0:
+            survived.append(True)
+        elif block_kept:
+            kept_original_rows.append(block_header)
+            survived.append(True)
+        else:
+            delete_rows.add(block_header)
+            survived.append(False)
+    # 空行分隔：相邻两个幸存块之间保留一个空行，其余空行删除
+    for block_index in range(1, len(blocks)):
+        gap_start = blocks[block_index - 1][2] + 1
+        gap_end = blocks[block_index][0] - 1
+        if gap_start > gap_end:
+            continue
+        if survived[block_index - 1] and survived[block_index]:
+            kept_original_rows.append(gap_start)
+            delete_rows.update(range(gap_start + 1, gap_end + 1))
+        else:
+            delete_rows.update(range(gap_start, gap_end + 1))
+    kept_original_rows.sort()
+    _delete_row_ranges(sheet, value_sheet, _rows_to_ranges(delete_rows))
+    return kept, discarded_empty, unmatched, kept_original_rows
+
+
+def _rows_to_ranges(rows) -> list[tuple[int, int]]:
+    """把行号集合压缩成自下而上排序的连续区间，供从底向上删行。"""
+    ranges: list[tuple[int, int]] = []
+    for row_index in sorted(rows, reverse=True):
+        if ranges and ranges[-1][0] == row_index + 1:
+            ranges[-1] = (row_index, ranges[-1][1])
+        else:
+            ranges.append((row_index, row_index))
+    return ranges
 def _compact_filtered_sheet(
     sheet,
     config: SheetConfig,

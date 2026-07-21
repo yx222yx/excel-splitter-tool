@@ -150,14 +150,15 @@ function renderSheetConfigs(selected) {
     const headerOptions = Array.from({ length: Math.min(15, preview.total_rows) }, (_, rowIndex) => rowIndex + 1).map((row) => `<option value="${row}" ${row === preview.suggested_header_row ? "selected" : ""}>第 ${row} 行</option>`).join("");
     const modeOptions = `<option value="full" selected>不拆分，完整保留</option><option value="reference">作为基准 Sheet</option><option value="linked">按关联键匹配</option><option value="direct">直接按本 Sheet 字段拆分</option>`;
     const table = renderPreviewRows(preview.rows, preview.start_row);
-    return `<article class="sheet-config" data-sheet="${escapeHtml(name)}" data-index="${index}"><h2>${escapeHtml(name)}</h2><div class="config-controls"><label>处理方式<select class="sheet-mode">${modeOptions}</select></label><label>表头行<select class="header-row">${headerOptions}</select></label><label class="split-column-control">拆分字段<select class="split-column"></select></label><label class="key-column-control">关联键字段<select class="key-column"></select></label></div><div class="preview-meta">已加载 <span class="loaded-rows">${preview.end_row}</span> / ${preview.total_rows} 行</div><div class="preview-wrap"><table class="preview-table"><tbody>${table}</tbody></table></div></article>`;
+    return `<article class="sheet-config" data-sheet="${escapeHtml(name)}" data-index="${index}"><h2>${escapeHtml(name)}</h2><div class="config-controls"><label>处理方式<select class="sheet-mode">${modeOptions}</select></label><label>表头行<select class="header-row">${headerOptions}</select></label><label class="split-column-control">拆分字段<select class="split-column"></select></label><label class="key-column-control">关联键字段<select class="key-column"></select></label></div><div class="block-configs"></div><div class="preview-meta">已加载 <span class="loaded-rows">${preview.end_row}</span> / ${preview.total_rows} 行</div><div class="preview-wrap"><table class="preview-table"><tbody>${table}</tbody></table></div></article>`;
   }).join("");
   document.querySelectorAll(".sheet-config").forEach((block) => {
-    block.querySelector(".header-row").addEventListener("change", () => updateColumns(block));
-    block.querySelector(".sheet-mode").addEventListener("change", () => updateModeControls(block));
+    block.querySelector(".header-row").addEventListener("change", () => { updateColumns(block); loadBlockInfo(); });
+    block.querySelector(".sheet-mode").addEventListener("change", () => { updateModeControls(block); loadBlockInfo(); });
     block.querySelector(".preview-wrap").addEventListener("scroll", () => maybeLoadMorePreview(block));
     updateColumns(block);
   });
+  loadBlockInfo();
 }
 
 function renderPreviewRows(rows, startRow) {
@@ -243,7 +244,55 @@ function sheetConfigs() {
       split_column_label: usesSplitColumn ? splitColumn.selectedOptions[0]?.dataset.label || "" : "",
       key_column_idx: usesKeyColumn ? Number(keyColumn.value) : null,
       key_column_label: usesKeyColumn ? keyColumn.selectedOptions[0]?.dataset.label || "" : "",
+      block_strategies: [...block.querySelectorAll(".block-strategy")].map((select) => select.value),
     };
+  });
+}
+
+/* ===== 多表区（block）配置 ===== */
+async function loadBlockInfo() {
+  try {
+    const configs = sheetConfigs();
+    validateSheetConfigs(configs);
+    const payload = await api("/api/split-values", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: state.jobId, sheet_configs: configs }),
+    }, false);
+    state.blockStrategies = collectBlockStrategies();
+    state.blocks = payload.blocks || {};
+    renderBlockConfigs();
+  } catch (error) {
+    // 配置暂不完整（如基准 Sheet 未选好）时静默忽略，沿用已有表区信息
+  }
+}
+
+function collectBlockStrategies() {
+  const result = {};
+  document.querySelectorAll(".sheet-config").forEach((block) => {
+    const selects = [...block.querySelectorAll(".block-strategy")];
+    if (selects.length) result[block.dataset.sheet] = selects.map((select) => select.value);
+  });
+  return result;
+}
+
+function renderBlockConfigs() {
+  document.querySelectorAll(".sheet-config").forEach((block) => {
+    const container = block.querySelector(".block-configs");
+    const blocks = (state.blocks || {})[block.dataset.sheet] || [];
+    if (blocks.length < 2) {
+      container.innerHTML = "";
+      return;
+    }
+    const saved = (state.blockStrategies || {})[block.dataset.sheet] || [];
+    container.innerHTML = blocks.slice(1).map((info, index) => {
+      const current = saved[index] || "follow";
+      const dataRows = Math.max(0, info.data_end - info.data_start + 1);
+      const options = [["follow", "跟随拆分"], ["keep", "保留到所有输出"], ["drop", "丢弃"]]
+        .map(([value, label]) => `<option value="${value}" ${value === current ? "selected" : ""}>${label}</option>`)
+        .join("");
+      return `<div class="block-config"><span class="muted">表区 ${index + 2}（第 ${info.header_row} 行起，表头：${escapeHtml(info.header_preview || "（空）")}，共 ${dataRows} 行数据）</span><select class="block-strategy">${options}</select></div>`;
+    }).join("");
   });
 }
 

@@ -8,6 +8,8 @@ from typing import Literal
 SplitMode = Literal["all", "selected"]
 OutputType = Literal["formula", "values"]
 SheetMode = Literal["direct", "reference", "linked", "full"]
+BlockStrategy = Literal["follow", "keep", "drop"]
+BLOCK_STRATEGIES = ("follow", "keep", "drop")
 MAX_HEADER_ROW = 15
 
 
@@ -20,6 +22,8 @@ class SheetConfig:
     mode: SheetMode = "direct"
     key_column_idx: int | None = None
     key_column_label: str = ""
+    # 表区策略：按块序号（块 2 起）对应 follow/keep/drop，缺省一律 follow
+    block_strategies: tuple[str, ...] = ()
 
     def validate(self) -> None:
         if not self.sheet_name.strip():
@@ -40,6 +44,8 @@ class SheetConfig:
             self.key_column_idx is None or self.key_column_idx < 1
         ):
             raise ValueError(f"{self.sheet_name} 的关联键列必须大于等于 1")
+        if any(strategy not in BLOCK_STRATEGIES for strategy in self.block_strategies):
+            raise ValueError(f"{self.sheet_name} 的表区策略无效")
 
 
 @dataclass(frozen=True, slots=True)
