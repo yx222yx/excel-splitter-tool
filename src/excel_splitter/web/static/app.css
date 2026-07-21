@@ -130,3 +130,47 @@ select, input[type="text"] { min-height: 40px; width: 100%; border: 1px solid #a
   .summary-strip div + div { border-left: 0; border-top: 1px solid #cfd6dc; }
   .result-item { grid-template-columns: 1fr; }
 }
+
+/* ===== 合并模式 ===== */
+.steps[hidden] { display: none; }
+.mstep {
+  width: 100%; height: 44px; display: flex; align-items: center; gap: 10px;
+  border: 0; border-radius: 6px; padding: 0 10px; color: #b9c3cc; background: transparent;
+  text-align: left;
+}
+.mstep span { width: 24px; height: 24px; display: grid; place-items: center; border: 1px solid #60717f; border-radius: 50%; font-size: 12px; }
+.mstep.active { color: #fff; background: #2b3a46; }
+.mstep.active span { border-color: #6fd3a6; color: #6fd3a6; }
+.mstep:disabled { cursor: default; opacity: 0.58; }
+
+.mode-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.form-grid label[hidden] { display: none; }
+
+.merge-file-list { margin-top: 16px; display: grid; gap: 8px; }
+.merge-file-row { min-height: 52px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; padding: 10px 12px; background: #fff; border: 1px solid #d4dbe0; border-radius: 6px; }
+.merge-file-name { overflow-wrap: anywhere; }
+.merge-file-actions { display: flex; gap: 6px; }
+
+.merge-password { margin-top: 16px; padding: 16px; background: #fff; border: 1px solid #d4dbe0; border-radius: 6px; display: grid; gap: 12px; max-width: 760px; }
+.merge-password[hidden] { display: none; }
+.merge-password label { display: grid; gap: 6px; color: #4e5d68; font-size: 13px; }
+.merge-failures { display: grid; gap: 8px; }
+.merge-failures:empty { display: none; }
+.merge-failure-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 10px 12px; border: 1px solid #e1e5e8; border-radius: 6px; }
+
+.merge-sheet-configs { display: grid; gap: 8px; }
+.merge-sheet-config { display: flex; align-items: center; gap: 16px; padding: 10px 12px; background: #fff; border: 1px solid #d4dbe0; border-radius: 6px; }
+.merge-sheet-config label { display: flex; align-items: center; gap: 8px; color: #4e5d68; font-size: 13px; }
+.merge-sheet-config input { width: 90px; min-height: 36px; border: 1px solid #aeb9c1; border-radius: 4px; padding: 6px 8px; }
+
+.merge-plan-results { margin-top: 16px; display: grid; gap: 12px; }
+.merge-plan-sheet { padding: 14px 16px; background: #fff; border: 1px solid #d4dbe0; border-radius: 6px; }
+.merge-plan-sheet h2 { margin: 0 0 8px; font-size: 15px; }
+.merge-plan-sheet ul { margin: 0; padding-left: 18px; color: #7a5416; font-size: 13px; }
+
+.merge-result-actions { display: flex; gap: 8px; }
+
+@media (max-width: 760px) {
+  .merge-file-row { grid-template-columns: 1fr; }
+  .merge-sheet-config { flex-wrap: wrap; }
+}

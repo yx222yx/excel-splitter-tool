@@ -391,3 +391,331 @@ byId("result-list").addEventListener("click", async (event) => {
 document.querySelectorAll(".back").forEach((button) => button.addEventListener("click", () => goStep(Number(button.dataset.target))));
 document.querySelectorAll(".step").forEach((button) => button.addEventListener("click", () => goStep(Number(button.dataset.step))));
 byId("restart").addEventListener("click", () => window.location.reload());
+
+/* ===== 合并模式 ===== */
+const mergeState = { jobId: null, files: [], sheets: [], selectedSheets: [], failedUnlocks: [], maxStep: 1, executing: false, step: 1 };
+const mergeTitles = ["", "添加文件", "选择 Sheet", "字段检查", "输出设置", "执行结果"];
+let lastSplitStep = 1;
+
+function setMode(mode) {
+  document.querySelectorAll(".mode-switch input").forEach((input) => { input.checked = input.value === mode; });
+  const isMerge = mode === "merge";
+  byId("steps-split").hidden = isMerge;
+  byId("steps-merge").hidden = !isMerge;
+  if (isMerge) {
+    lastSplitStep = Number(document.querySelector("#steps-split .step.active")?.dataset.step || 1);
+    byId("file-status").textContent = mergeState.files.length ? `合并模式：已添加 ${mergeState.files.length} 个文件` : "合并模式：未添加文件";
+    byId("file-status").classList.remove("loaded");
+    mergeGoStep(mergeState.step);
+  } else {
+    byId("file-status").textContent = state.jobId ? `已加载：${state.filename} · ${state.sheets.length} 个 Sheet` : "未加载文件";
+    byId("file-status").classList.toggle("loaded", Boolean(state.jobId));
+    goStep(lastSplitStep);
+  }
+}
+
+document.querySelectorAll(".mode-switch input").forEach((input) => {
+  input.addEventListener("change", (event) => setMode(event.target.value));
+});
+
+function mergeGoStep(step) {
+  mergeState.step = step;
+  document.querySelectorAll(".panel").forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === `merge-${step}`));
+  document.querySelectorAll(".mstep").forEach((button) => button.classList.toggle("active", Number(button.dataset.mergeStep) === step));
+  byId("page-title").textContent = mergeTitles[step];
+  mergeRefreshNav();
+  showAlert("");
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function mergeRefreshNav() {
+  document.querySelectorAll(".mstep").forEach((button) => { button.disabled = Number(button.dataset.mergeStep) > mergeState.maxStep; });
+  byId("merge-to-sheets").disabled = !(mergeState.files.length >= 2 && !mergeState.files.some((file) => file.encrypted));
+}
+
+function mergeApi(path, body) {
+  return api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+}
+
+byId("merge-file-input").addEventListener("change", async (event) => {
+  const files = [...event.target.files];
+  event.target.value = "";
+  if (!files.length) return;
+  const form = new FormData();
+  files.forEach((file) => {
+    form.append("files", file);
+    form.append("source_paths", file.path || "");
+  });
+  if (mergeState.jobId) form.append("job_id", mergeState.jobId);
+  try {
+    const payload = await api("/api/merge/load", { method: "POST", body: form });
+    mergeState.jobId = payload.job_id;
+    mergeState.files = payload.files;
+    renderMergeFiles();
+  } catch (error) { showAlert(error.message); }
+});
+
+function renderMergeFiles() {
+  byId("merge-file-list").innerHTML = mergeState.files.map((file, index) => `<div class="merge-file-row" data-id="${file.file_id}"><span class="merge-file-name">${file.encrypted ? "🔒 " : ""}${escapeHtml(file.filename)}</span><span class="muted">${formatFileSize(file.size)}${file.encrypted ? " · 已加密" : ""}</span><span class="merge-file-actions"><button type="button" class="secondary small merge-move" data-dir="-1" ${index === 0 ? "disabled" : ""}>上移</button><button type="button" class="secondary small merge-move" data-dir="1" ${index === mergeState.files.length - 1 ? "disabled" : ""}>下移</button><button type="button" class="secondary small merge-remove">移除</button></span></div>`).join("");
+  byId("merge-file-count").textContent = mergeState.files.length ? `已添加 ${mergeState.files.length} 个文件` : "尚未添加文件";
+  byId("merge-file-picker").textContent = mergeState.files.length ? "继续添加文件" : "添加 .xlsx 文件";
+  byId("merge-upload-zone").classList.toggle("has-file", mergeState.files.length > 0);
+  byId("merge-password-section").hidden = !mergeState.files.some((file) => file.encrypted);
+  byId("file-status").textContent = mergeState.files.length ? `合并模式：已添加 ${mergeState.files.length} 个文件` : "合并模式：未添加文件";
+  mergeRefreshNav();
+}
+
+byId("merge-file-list").addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  const row = button?.closest(".merge-file-row");
+  const fileId = row?.dataset.id;
+  if (!fileId) return;
+  try {
+    if (button.classList.contains("merge-remove")) {
+      const payload = await mergeApi("/api/merge/files/remove", { job_id: mergeState.jobId, file_id: fileId });
+      mergeState.files = payload.files;
+    } else if (button.classList.contains("merge-move")) {
+      const index = mergeState.files.findIndex((file) => file.file_id === fileId);
+      const target = index + Number(button.dataset.dir);
+      if (index < 0 || target < 0 || target >= mergeState.files.length) return;
+      const ids = mergeState.files.map((file) => file.file_id);
+      [ids[index], ids[target]] = [ids[target], ids[index]];
+      const payload = await mergeApi("/api/merge/files/reorder", { job_id: mergeState.jobId, file_ids: ids });
+      mergeState.files = payload.files;
+    } else {
+      return;
+    }
+    renderMergeFiles();
+  } catch (error) { showAlert(error.message); }
+});
+
+byId("merge-unlock").addEventListener("click", async () => {
+  const password = byId("merge-password").value;
+  if (!password) return showAlert("请输入统一密码");
+  byId("merge-password").value = "";
+  await mergeUnlock({ password });
+});
+
+byId("merge-password").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") byId("merge-unlock").click();
+});
+
+async function mergeUnlock(body) {
+  try {
+    const payload = await mergeApi("/api/merge/unlock", { job_id: mergeState.jobId, ...body });
+    payload.results.forEach((result) => {
+      if (!result.success) return;
+      const file = mergeState.files.find((item) => item.file_id === result.file_id);
+      if (file) file.encrypted = false;
+    });
+    mergeState.failedUnlocks = payload.results.filter((result) => !result.success);
+    renderMergeFiles();
+    renderUnlockFailures();
+  } catch (error) { showAlert(error.message); }
+}
+
+function renderUnlockFailures() {
+  byId("merge-unlock-failures").innerHTML = mergeState.failedUnlocks.map((result) => `<div class="merge-failure-row" data-id="${result.file_id}"><span class="merge-file-name">🔒 ${escapeHtml(result.filename)}</span><span class="muted">${escapeHtml(result.error || "解密失败")}，可单独输入密码重试，或移除该文件</span><span class="input-action"><input type="password" placeholder="该文件的密码"><button type="button" class="secondary small merge-retry">重试</button></span></div>`).join("");
+}
+
+byId("merge-unlock-failures").addEventListener("click", async (event) => {
+  const button = event.target.closest(".merge-retry");
+  if (!button) return;
+  const row = button.closest(".merge-failure-row");
+  const password = row.querySelector("input").value;
+  if (!password) return showAlert("请输入该文件的密码");
+  await mergeUnlock({ file_passwords: { [row.dataset.id]: password } });
+});
+
+byId("merge-to-sheets").addEventListener("click", async () => {
+  try {
+    const payload = await mergeApi("/api/merge/sheets", { job_id: mergeState.jobId });
+    mergeState.sheets = payload.sheets;
+    byId("merge-sheet-list").innerHTML = payload.sheets.map((name) => `<label class="check-item"><input type="checkbox" value="${escapeHtml(name)}" checked><span>${escapeHtml(name)}</span></label>`).join("");
+    byId("merge-select-all-sheets").checked = true;
+    mergeState.maxStep = Math.max(mergeState.maxStep, 2);
+    mergeGoStep(2);
+  } catch (error) { showAlert(error.message); }
+});
+
+byId("merge-select-all-sheets").addEventListener("change", (event) => {
+  byId("merge-sheet-list").querySelectorAll("input").forEach((input) => { input.checked = event.target.checked; });
+});
+
+function mergeSelectedSheets() {
+  return [...byId("merge-sheet-list").querySelectorAll("input:checked")].map((input) => input.value);
+}
+
+byId("merge-to-fields").addEventListener("click", () => {
+  const selected = mergeSelectedSheets();
+  if (!selected.length) return showAlert("至少选择一个 Sheet");
+  mergeState.selectedSheets = selected;
+  byId("merge-sheet-configs").innerHTML = selected.map((name) => `<div class="merge-sheet-config" data-sheet="${escapeHtml(name)}"><span class="merge-file-name">${escapeHtml(name)}</span><label>表头行<input type="number" class="merge-header-row" min="1" max="15" value="1"></label></div>`).join("");
+  byId("merge-plan-results").innerHTML = "";
+  mergeState.maxStep = Math.max(mergeState.maxStep, 3);
+  mergeGoStep(3);
+});
+
+function mergeSheetConfigs() {
+  return [...document.querySelectorAll(".merge-sheet-config")].map((row) => ({
+    sheet_name: row.dataset.sheet,
+    header_row: Number(row.querySelector(".merge-header-row").value) || 1,
+  }));
+}
+
+byId("merge-check-plan").addEventListener("click", async () => {
+  try {
+    const payload = await mergeApi("/api/merge/plan", { job_id: mergeState.jobId, sheet_configs: mergeSheetConfigs() });
+    renderMergePlan(payload);
+  } catch (error) { showAlert(error.message); }
+});
+
+function renderMergePlan(plan) {
+  const sheets = plan.sheets.map((sheet) => {
+    const issues = [];
+    Object.entries(sheet.missing_fields).forEach(([file, fields]) => issues.push(`文件 ${escapeHtml(file)} 缺少字段：${escapeHtml(fields.join("、"))}，对应列将留空`));
+    Object.entries(sheet.extra_fields).forEach(([file, fields]) => issues.push(`文件 ${escapeHtml(file)} 多出字段：${escapeHtml(fields.join("、"))}，将追加到表头末尾`));
+    sheet.missing_files.forEach((file) => issues.push(`文件 ${escapeHtml(file)} 没有该 Sheet，将跳过`));
+    const body = issues.length
+      ? `<ul>${issues.map((line) => `<li>${line}</li>`).join("")}</ul>`
+      : `<div class="muted">所有文件字段一致</div>`;
+    return `<article class="merge-plan-sheet"><h2>${escapeHtml(sheet.sheet_name)}（并集 ${sheet.union_headers.length} 个字段）</h2>${body}</article>`;
+  }).join("");
+  const warnings = (plan.warnings || []).length
+    ? `<div class="warning-list">${plan.warnings.map((message) => `<div>${escapeHtml(message)}</div>`).join("")}</div>`
+    : "";
+  byId("merge-plan-results").innerHTML = sheets + warnings;
+}
+
+function mergeParentDir(path) {
+  const sep = path.includes("/") ? "/" : "\\";
+  return path.substring(0, path.lastIndexOf(sep));
+}
+
+byId("merge-to-output").addEventListener("click", () => {
+  const first = mergeState.files[0];
+  if (first) {
+    if (!byId("merge-output-dir").value && first.source_path) {
+      byId("merge-output-dir").value = mergeParentDir(first.source_path);
+    }
+    if (!byId("merge-output-filename").value) {
+      byId("merge-output-filename").value = `${first.filename.replace(/\.xlsx$/i, "")}_合并结果.xlsx`;
+    }
+  }
+  mergeState.maxStep = Math.max(mergeState.maxStep, 4);
+  mergeGoStep(4);
+});
+
+byId("merge-browse-output-dir").addEventListener("click", async () => {
+  setBusy(true, "请选择输出目录");
+  try {
+    const payload = await api("/api/select-output-dir", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ current_path: byId("merge-output-dir").value }),
+    }, false);
+    if (payload.selected) byId("merge-output-dir").value = payload.path;
+  } catch (error) {
+    showAlert(error.message);
+  } finally {
+    setBusy(false);
+  }
+});
+
+byId("merge-output-encrypt").addEventListener("change", (event) => {
+  byId("merge-output-password-group").hidden = !event.target.checked;
+});
+
+byId("merge-execute").addEventListener("click", async () => {
+  const encryptChecked = byId("merge-output-encrypt").checked;
+  const outputPassword = encryptChecked ? byId("merge-output-password").value : "";
+  if (encryptChecked && !outputPassword) return showAlert("请输入加密密码");
+  const body = {
+    job_id: mergeState.jobId,
+    sheet_configs: mergeSheetConfigs(),
+    include_source_column: byId("merge-include-source").checked,
+    overwrite: byId("merge-overwrite").checked,
+    output_password: outputPassword,
+    background: true,
+  };
+  if (byId("merge-output-dir").value.trim()) body.output_dir = byId("merge-output-dir").value.trim();
+  if (byId("merge-output-filename").value.trim()) body.output_filename = byId("merge-output-filename").value.trim();
+  try {
+    mergeState.maxStep = 5;
+    mergeState.executing = true;
+    mergeGoStep(5);
+    mergePrepareProgress();
+    setBusy(true, "合并任务执行中");
+    const started = await api("/api/merge/execute", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, false);
+    await mergePollExecution(started.progress_url);
+  } catch (error) {
+    mergeUpdateProgress(0, "合并失败");
+    showAlert(error.message);
+  } finally {
+    mergeState.executing = false;
+    setBusy(false);
+    mergeRefreshNav();
+  }
+});
+
+function mergePrepareProgress() {
+  byId("merge-progress-panel").hidden = false;
+  byId("merge-result-content").hidden = true;
+  mergeUpdateProgress(0, "任务已提交，正在准备");
+}
+
+function mergeUpdateProgress(percent, message) {
+  const normalized = Math.max(0, Math.min(100, Number(percent) || 0));
+  byId("merge-execution-progress").value = normalized;
+  byId("merge-execution-progress").textContent = `${normalized}%`;
+  byId("merge-progress-percent").textContent = `${normalized}%`;
+  byId("merge-progress-message").textContent = message;
+}
+
+async function mergePollExecution(progressUrl) {
+  while (true) {
+    const snapshot = await api(progressUrl, {}, false);
+    mergeUpdateProgress(snapshot.progress, snapshot.message);
+    if (snapshot.status === "complete") {
+      renderMergeResults(snapshot.result);
+      return;
+    }
+    if (snapshot.status === "failed") throw new Error(snapshot.error || "合并失败");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+function renderMergeResults(payload) {
+  byId("merge-result-content").hidden = false;
+  mergeUpdateProgress(100, "合并完成");
+  byId("merge-total-rows").textContent = payload.total_rows;
+  byId("merge-sheet-count").textContent = payload.results.length;
+  byId("merge-warning-count").textContent = payload.warnings.length;
+  byId("merge-error-count").textContent = payload.errors.length;
+  const sheetStats = payload.results.map((result) => {
+    const sources = Object.entries(result.source_rows).map(([file, rows]) => `${escapeHtml(file)} ${rows} 行`).join("，");
+    return `<div class="result-stats"><span>${escapeHtml(result.sheet_name)}：合并 ${result.merged_rows} 行（${sources}）</span></div>`;
+  }).join("");
+  byId("merge-result-list").innerHTML = `${sheetStats}<div class="result-item"><strong>合并结果</strong><span class="result-path">${escapeHtml(payload.output_file)}</span><span class="merge-result-actions"><button class="btn-action" data-action="open-file" data-path="${escapeHtml(payload.output_file)}">打开文件</button><button class="btn-action" data-action="open-folder" data-path="${escapeHtml(payload.output_file)}">打开所在文件夹</button></span></div>`;
+  const messages = [...payload.warnings, ...payload.errors];
+  byId("merge-warning-list").innerHTML = messages.map((message) => `<div>${escapeHtml(message)}</div>`).join("");
+  mergeRefreshNav();
+}
+
+byId("merge-result-list").addEventListener("click", async (event) => {
+  const button = event.target.closest(".btn-action");
+  if (!button) return;
+  try {
+    await api(`/api/action/${button.dataset.action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: button.dataset.path }),
+    }, false);
+  } catch (error) {
+    showAlert(error.message);
+  }
+});
+
+document.querySelectorAll(".mback").forEach((button) => button.addEventListener("click", () => mergeGoStep(Number(button.dataset.mergeTarget))));
+document.querySelectorAll(".mstep").forEach((button) => button.addEventListener("click", () => mergeGoStep(Number(button.dataset.mergeStep))));
+byId("merge-restart").addEventListener("click", () => window.location.reload());

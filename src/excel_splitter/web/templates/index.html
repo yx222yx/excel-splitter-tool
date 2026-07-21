@@ -10,13 +10,20 @@
   <div class="app-shell">
     <aside class="sidebar">
       <div class="brand">Excel 通用拆表工具</div>
-      <nav class="steps" aria-label="处理步骤">
+      <nav class="steps" id="steps-split" aria-label="处理步骤">
         <button class="step active" data-step="1"><span>1</span>选择文件</button>
         <button class="step" data-step="2" disabled><span>2</span>选择 Sheet</button>
         <button class="step" data-step="3" disabled><span>3</span>配置字段</button>
         <button class="step" data-step="4" disabled><span>4</span>选择拆分值</button>
         <button class="step" data-step="5" disabled><span>5</span>输出设置</button>
         <button class="step" data-step="6" disabled><span>6</span>执行结果</button>
+      </nav>
+      <nav class="steps" id="steps-merge" aria-label="合并步骤" hidden>
+        <button class="mstep active" data-merge-step="1"><span>1</span>添加文件</button>
+        <button class="mstep" data-merge-step="2" disabled><span>2</span>选择 Sheet</button>
+        <button class="mstep" data-merge-step="3" disabled><span>3</span>字段检查</button>
+        <button class="mstep" data-merge-step="4" disabled><span>4</span>输出设置</button>
+        <button class="mstep" data-merge-step="5" disabled><span>5</span>执行结果</button>
       </nav>
     </aside>
 
@@ -32,6 +39,13 @@
       <div id="alert" class="alert" hidden role="alert"></div>
 
       <section class="panel active" data-panel="1">
+        <div class="mode-bar">
+          <span class="muted">功能模式</span>
+          <div class="segmented mode-switch">
+            <label><input type="radio" name="mode" value="split" checked>拆分</label>
+            <label><input type="radio" name="mode" value="merge">合并</label>
+          </div>
+        </div>
         <div id="upload-zone" class="upload-zone">
           <label id="file-picker" class="file-picker" for="excel-file">选择 .xlsx 文件</label>
           <input id="excel-file" type="file" accept=".xlsx" hidden>
@@ -113,6 +127,88 @@
         </div>
         <div class="actions">
           <button id="restart" class="secondary">处理另一个文件</button>
+        </div>
+      </section>
+      <section class="panel" data-panel="merge-1">
+        <div class="mode-bar">
+          <span class="muted">功能模式</span>
+          <div class="segmented mode-switch">
+            <label><input type="radio" name="mode" value="split">拆分</label>
+            <label><input type="radio" name="mode" value="merge">合并</label>
+          </div>
+        </div>
+        <div id="merge-upload-zone" class="upload-zone">
+          <label id="merge-file-picker" class="file-picker" for="merge-file-input">添加 .xlsx 文件</label>
+          <input id="merge-file-input" type="file" accept=".xlsx" multiple hidden>
+          <div class="file-selection">
+            <strong id="merge-file-count" class="selected-file-name">尚未添加文件</strong>
+            <span class="muted">可多次添加，至少两个文件；列表顺序即合并顺序</span>
+          </div>
+        </div>
+        <div id="merge-file-list" class="merge-file-list"></div>
+        <div id="merge-password-section" class="merge-password" hidden>
+          <label>统一密码（适用于所有加密文件）<span class="input-action"><input id="merge-password" type="password" placeholder="请输入统一密码"><button id="merge-unlock" type="button" class="secondary">解锁</button></span></label>
+          <div id="merge-unlock-failures" class="merge-failures"></div>
+        </div>
+        <div class="actions">
+          <button id="merge-to-sheets" class="primary" disabled>下一步：选择 Sheet</button>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="merge-2">
+        <div class="select-all-bar"><label><input type="checkbox" id="merge-select-all-sheets" checked> 全选</label></div>
+        <div id="merge-sheet-list" class="check-list"></div>
+        <div class="actions">
+          <button class="secondary mback" data-merge-target="1">上一步</button>
+          <button id="merge-to-fields" class="primary">配置所选 Sheet</button>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="merge-3">
+        <div id="merge-sheet-configs" class="merge-sheet-configs"></div>
+        <div class="value-toolbar"><button id="merge-check-plan" class="secondary small">检查字段匹配</button></div>
+        <div id="merge-plan-results" class="merge-plan-results"></div>
+        <div class="actions">
+          <button class="secondary mback" data-merge-target="2">上一步</button>
+          <button id="merge-to-output" class="primary">设置输出</button>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="merge-4">
+        <div class="form-grid">
+          <label>输出目录<span class="input-action"><input id="merge-output-dir" type="text" placeholder="默认为第一个文件所在目录"><button id="merge-browse-output-dir" type="button" class="secondary">选择文件夹</button></span></label>
+          <label>输出文件名<input id="merge-output-filename" type="text" placeholder="默认为「第一个文件名_合并结果.xlsx」"></label>
+          <label class="toggle"><input id="merge-include-source" type="checkbox"><span>添加「来源文件」列</span></label>
+          <label class="toggle"><input id="merge-output-encrypt" type="checkbox"><span>加密输出文件</span></label>
+          <label id="merge-output-password-group" hidden>加密密码<span class="input-action"><input id="merge-output-password" type="password" placeholder="请输入加密密码"></span></label>
+          <label class="toggle"><input id="merge-overwrite" type="checkbox"><span>覆盖同名文件</span></label>
+        </div>
+        <div class="actions">
+          <button class="secondary mback" data-merge-target="3">上一步</button>
+          <button id="merge-execute" class="primary">开始合并</button>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="merge-5">
+        <div id="merge-progress-panel" class="progress-panel" hidden aria-live="polite">
+          <div class="progress-heading">
+            <strong id="merge-progress-message">准备开始</strong>
+            <span id="merge-progress-percent">0%</span>
+          </div>
+          <progress id="merge-execution-progress" max="100" value="0">0%</progress>
+        </div>
+        <div id="merge-result-content" hidden>
+          <div class="summary-strip">
+            <div><strong id="merge-total-rows">0</strong><span>合并总行数</span></div>
+            <div><strong id="merge-sheet-count">0</strong><span>合并 Sheet</span></div>
+            <div><strong id="merge-warning-count">0</strong><span>警告</span></div>
+            <div><strong id="merge-error-count">0</strong><span>错误</span></div>
+          </div>
+          <div id="merge-result-list" class="result-list"></div>
+          <div id="merge-warning-list" class="warning-list"></div>
+        </div>
+        <div class="actions">
+          <button id="merge-restart" class="secondary">处理另一批文件</button>
         </div>
       </section>
     </main>
