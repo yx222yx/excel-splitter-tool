@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from copy import copy
 from pathlib import Path
 from typing import Callable
@@ -9,6 +10,7 @@ from zipfile import ZipFile
 
 from openpyxl.formula.translate import Translator
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import range_boundaries
 
 from .excel_io import load_workbook_with_warnings
 from .merge_models import MergeJob, MergeSheetConfig, MergeSheetResult, MergeSummary
@@ -19,6 +21,9 @@ from .values import normalize_split_value
 EMPTY_ROW_STOP_THRESHOLD = 10000
 EXTRA_COLUMN_WIDTH = 12  # 并集新增列的默认列宽
 ProgressCallback = Callable[[int, str], None]
+
+# 常见 A1 形态单元格引用（排除跨 sheet 引用、函数名、区域右半部分）
+_CELL_REF_PATTERN = re.compile(r"(?<![A-Za-z0-9_$!:])(\$?)([A-Z]{1,3})(\$?)([0-9]{1,7})(?!\()")
 
 
 class MergeEngine:
@@ -68,6 +73,12 @@ class MergeEngine:
         fingerprints: dict[str, dict[str, str]] = {
             config.sheet_name: {} for config in job.sheet_configs
         }
+        # 每个 sheet 的结果级警告（如公式引用表头行上方单元格）
+        sheet_extra_warnings: dict[str, list[str]] = {
+            config.sheet_name: [] for config in job.sheet_configs
+        }
+        # 被追加过的 sheet：追加前末行 -> 追加后末行，用于图表数据范围延伸
+        extended_ranges: dict[str, tuple[int, int]] = {}
 
         total_units = max(1, len(job.input_files) * len(job.sheet_configs))
         done_units = 0
@@ -102,10 +113,15 @@ class MergeEngine:
                         skipped_duplicates[config.sheet_name],
                         fingerprints[config.sheet_name],
                         all_warnings,
+                        sheet_extra_warnings[config.sheet_name],
+                        extended_ranges,
                         report,
                     )
                 except Exception as exc:
                     errors.append(f"{config.sheet_name}: {exc}")
+
+            if extended_ranges:
+                self._extend_chart_ranges(workbook, extended_ranges, all_warnings)
 
             ordered = [name for name in job.selected_sheets if name in workbook.sheetnames]
             if not ordered:
@@ -122,7 +138,7 @@ class MergeEngine:
         for config in job.sheet_configs:
             sheet_plan = plans_by_sheet.get(config.sheet_name)
             sheet_source = source_rows[config.sheet_name]
-            sheet_warnings: list[str] = []
+            sheet_warnings: list[str] = list(sheet_extra_warnings[config.sheet_name])
             if sheet_plan is not None:
                 for file_name, fields in sheet_plan.missing_fields.items():
                     if file_name in sheet_source:
@@ -198,6 +214,8 @@ class MergeEngine:
         skipped_duplicates: dict[str, str],
         fingerprints: dict[str, str],
         warnings: list[str],
+        sheet_warnings: list[str],
+        extended_ranges: dict[str, tuple[int, int]],
         report: Callable[[float, str], None],
     ) -> None:
         sheet_name = config.sheet_name
@@ -208,6 +226,7 @@ class MergeEngine:
         if not files:
             warnings.append(f"所有输入文件都不包含 sheet：{sheet_name}")
             return
+        last_row_before_append: int | None = None
         total = len(files)
         for index, input_file in enumerate(files):
             if ws is None or input_file == job.input_files[0]:
@@ -218,6 +237,7 @@ class MergeEngine:
                 if job.skip_duplicate_sheets:
                     fingerprints[_sheet_fingerprint(ws)] = input_file.name
                 self._prepare_union_columns(ws, config, sheet_plan, job, input_file)
+                last_row_before_append = ws.max_row
                 report((index + 1) / total, f"已就位 {input_file.name} / {sheet_name}")
                 continue
             if job.skip_duplicate_sheets:
@@ -239,10 +259,17 @@ class MergeEngine:
                 sheet_plan,
                 job,
                 warnings,
+                sheet_warnings,
                 lambda fraction, message: report((index + fraction) / total, message),
             )
             source_rows[input_file.name] = added
             report((index + 1) / total, f"已合并 {input_file.name} / {sheet_name}")
+        if (
+            last_row_before_append is not None
+            and ws is not None
+            and ws.max_row > last_row_before_append
+        ):
+            extended_ranges[sheet_name] = (last_row_before_append, ws.max_row)
 
     def _prepare_union_columns(
         self,
@@ -283,6 +310,7 @@ class MergeEngine:
         sheet_plan: MergeSheetPlan,
         job: MergeJob,
         warnings: list[str],
+        sheet_warnings: list[str],
         report: Callable[[float, str], None],
     ) -> int:
         """流式读取一个文件的数据行，按表头名映射追加到模板 sheet 末尾。"""
@@ -303,6 +331,7 @@ class MergeEngine:
         added = 0
         consecutive_empty = 0
         next_row = ws.max_row + 1
+        risky_references: dict[str, int] = {}  # 引用 -> 首次出现的源行号
         try:
             sheet = source_workbook[sheet_name]
             total_rows = (
@@ -336,6 +365,8 @@ class MergeEngine:
                 consecutive_empty = 0
                 for target_column, value, source_cell in pending:
                     if isinstance(value, str) and value.startswith("="):
+                        for ref in _find_risky_references(value, config.header_row):
+                            risky_references.setdefault(ref, source_cell.row)
                         value = _translate_formula(
                             value, source_cell.coordinate, target_column, next_row
                         )
@@ -359,7 +390,96 @@ class MergeEngine:
                     report(fraction, message)
         finally:
             source_workbook.close()
+        for ref, row_number in risky_references.items():
+            parts = re.fullmatch(r"([A-Z]+)([0-9]+)", ref)
+            absolute = f"${parts.group(1)}${parts.group(2)}" if parts else ref
+            sheet_warnings.append(
+                f"文件 {input_file.name} 的 sheet「{sheet_name}」第 {row_number} 行公式"
+                f"引用了表头行上方的单元格 {ref}，平移后可能指向错误位置，"
+                f"建议改用绝对引用（{absolute}）"
+            )
         return added
+
+    def _extend_chart_ranges(
+        self,
+        workbook,
+        extended_ranges: dict[str, tuple[int, int]],
+        warnings: list[str],
+    ) -> None:
+        """把图表中指向"被追加 sheet 的追加前末行"的数据区域延伸到追加后末行。
+
+        只处理末行恰好等于追加前末行的完整区域，其余一律不动（不瞎猜部分区间）。
+        任何异常都不中断合并，记警告继续。
+        """
+        for ws in workbook.worksheets:
+            for chart in getattr(ws, "_charts", None) or []:
+                try:
+                    self._extend_chart(chart, ws.title, extended_ranges)
+                except Exception as exc:
+                    warnings.append(
+                        f"延伸图表数据范围失败（{ws.title}）：{exc}，已保留原范围"
+                    )
+
+    def _extend_chart(
+        self, chart, current_sheet: str, extended_ranges: dict[str, tuple[int, int]]
+    ) -> None:
+        for series in getattr(chart, "series", None) or []:
+            for ref_holder in _series_ref_holders(series):
+                formula = getattr(ref_holder, "f", None)
+                updated = _extend_ref_formula(formula, current_sheet, extended_ranges)
+                if updated is not None:
+                    ref_holder.f = updated
+
+
+def _series_ref_holders(series) -> list:
+    """取 series 上的数据区域引用对象（值/分类/散点 XY），不含单单元格的标题引用。"""
+    holders = []
+    val = getattr(series, "val", None)
+    ref = getattr(val, "numRef", None)
+    if ref is not None:
+        holders.append(ref)
+    cat = getattr(series, "cat", None)
+    for attr in ("strRef", "numRef"):
+        ref = getattr(cat, attr, None)
+        if ref is not None:
+            holders.append(ref)
+    for attr in ("xVal", "yVal"):
+        axis = getattr(series, attr, None)
+        ref = getattr(axis, "numRef", None)
+        if ref is not None:
+            holders.append(ref)
+    return holders
+
+
+def _extend_ref_formula(
+    formula, current_sheet: str, extended_ranges: dict[str, tuple[int, int]]
+) -> str | None:
+    """若引用指向被追加 sheet 且区域末行 == 追加前末行，返回延伸后的引用，否则 None。"""
+    if not isinstance(formula, str) or not formula:
+        return None
+    if "!" in formula:
+        prefix, range_part = formula.rsplit("!", 1)
+        sheet_name = prefix.strip("'")
+    else:
+        prefix, range_part, sheet_name = None, formula, current_sheet
+    if sheet_name not in extended_ranges:
+        return None
+    before, after = extended_ranges[sheet_name]
+    try:
+        min_col, min_row, max_col, max_row = range_boundaries(
+            range_part.replace("$", "")
+        )
+    except (ValueError, TypeError):
+        return None
+    if max_row is None or (min_col == max_col and min_row == max_row):
+        return None  # 整列引用或单单元格引用不处理
+    if max_row != before:
+        return None  # 末行不是追加前末行的不瞎猜
+    new_range = (
+        f"${get_column_letter(min_col)}${min_row}"
+        f":${get_column_letter(max_col)}${after}"
+    )
+    return f"{prefix}!{new_range}" if prefix is not None else new_range
 
 
 def _translate_formula(formula: str, origin: str, target_column: int, target_row: int) -> str:
@@ -370,6 +490,24 @@ def _translate_formula(formula: str, origin: str, target_column: int, target_row
         )
     except Exception:
         return formula
+
+
+def _find_risky_references(formula: str, header_row: int) -> list[str]:
+    """找出公式中"同 sheet、行号 <= 表头行的相对引用"（平移后可能指错位置）。
+
+    只处理常见 A1 形态；跨 sheet 引用（带 !）、绝对引用（带 $）、函数名、
+    区域右半部分都不纳入（宁缺毋滥）。
+    """
+    refs: list[str] = []
+    for match in _CELL_REF_PATTERN.finditer(formula):
+        column_abs, _column, row_abs, row_digits = match.groups()
+        if column_abs or row_abs:
+            continue  # 绝对引用不警告
+        if int(row_digits) <= header_row:
+            ref = match.group(0)
+            if ref not in refs:
+                refs.append(ref)
+    return refs
 
 
 def _count_data_rows(worksheet, header_row: int) -> int:

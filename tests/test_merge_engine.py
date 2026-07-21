@@ -749,3 +749,179 @@ def test_header_row_appears_only_once_with_three_files(tmp_path):
     workbook.close()
     assert column_a.count("姓名") == 1
     assert column_a == ["姓名", "员工A", "员工B", "员工C"]
+
+
+def test_appended_formulas_translate_independently_per_file(tmp_path):
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {"工时": [["姓名", "单价", "数量", "金额"], ["张三", 10, 2, "=B2*C2"]]},
+    )
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {"工时": [["姓名", "单价", "数量", "金额"], ["王五", 20, 3, "=B2*C2"]]},
+    )
+    file_c = _make_workbook(
+        tmp_path / "部门C.xlsx",
+        {"工时": [["姓名", "单价", "数量", "金额"], ["赵六", 30, 4, "=B2*C2"]]},
+    )
+    output = tmp_path / "合并结果.xlsx"
+    job = MergeJob(
+        input_files=(file_a, file_b, file_c),
+        output_file=output,
+        sheet_configs=(MergeSheetConfig("工时"),),
+    )
+
+    MergeEngine().execute(job)
+
+    workbook = load_workbook(output)
+    sheet = workbook["工时"]
+    # 每个文件的公式按自己的源坐标平移，互不串行
+    assert sheet["D2"].value == "=B2*C2"  # 模板原文不动
+    assert sheet["D3"].value == "=B3*C3"
+    assert sheet["D4"].value == "=B4*C4"
+    workbook.close()
+
+
+def test_appended_range_formula_translates(tmp_path):
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {"工时": [["姓名", "一", "二", "三", "合计"], ["张三", 1, 2, 3, "=SUM(B2:D2)"]]},
+    )
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {"工时": [["姓名", "一", "二", "三", "合计"], ["王五", 4, 5, 6, "=SUM(B2:D2)"]]},
+    )
+    output = tmp_path / "合并结果.xlsx"
+    job = MergeJob(
+        input_files=(file_a, file_b),
+        output_file=output,
+        sheet_configs=(MergeSheetConfig("工时"),),
+    )
+
+    MergeEngine().execute(job)
+
+    workbook = load_workbook(output)
+    assert workbook["工时"]["E3"].value == "=SUM(B3:D3)"
+    workbook.close()
+
+
+def test_formula_referencing_above_header_translates_and_warns(tmp_path):
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {"工时": [["姓名", "工时", "公式"], ["张三", 8, None], ["李四", 7, None], ["王五", 6, None]]},
+    )
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {"工时": [["姓名", "工时", "公式"], ["赵六", 5, None], ["孙七", 4, None], ["周八", 3, None], ["吴九", 2, "=B5*A1"]]},
+    )
+    output = tmp_path / "合并结果.xlsx"
+    job = MergeJob(
+        input_files=(file_a, file_b),
+        output_file=output,
+        sheet_configs=(MergeSheetConfig("工时"),),
+    )
+
+    summary = MergeEngine().execute(job)
+
+    workbook = load_workbook(output)
+    # 锁定当前平移行为：=B5*A1 从第 5 行追加到第 8 行 → =B8*A4（Excel 复制语义，可能指错位置）
+    assert workbook["工时"]["C8"].value == "=B8*A4"
+    workbook.close()
+    warnings = summary.results[0].warnings
+    assert any("A1" in w and "绝对引用" in w and "部门B.xlsx" in w for w in warnings)
+
+
+def test_formula_absolute_and_cross_sheet_references_do_not_warn(tmp_path):
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {"工时": [["姓名", "工时", "公式"], ["张三", 8, None]], "汇总": [["指标"], [1]]},
+    )
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {
+            "工时": [
+                ["姓名", "工时", "公式"],
+                ["李四", 7, "=$A$1*B2"],      # 绝对引用：平移安全，不警告
+                ["王五", 6, "=汇总!A1*B3"],   # 跨 sheet 引用：不在本警告范围
+                ["赵六", 5, "=B4+C4"],        # 引用同区域数据行：正常平移，不警告
+            ],
+            "汇总": [["指标"], [2]],
+        },
+    )
+    output = tmp_path / "合并结果.xlsx"
+    job = MergeJob(
+        input_files=(file_a, file_b),
+        output_file=output,
+        sheet_configs=(MergeSheetConfig("工时"), MergeSheetConfig("汇总")),
+    )
+
+    summary = MergeEngine().execute(job)
+
+    result = next(r for r in summary.results if r.sheet_name == "工时")
+    assert not any("表头行上方" in w for w in result.warnings)
+    workbook = load_workbook(output)
+    sheet = workbook["工时"]
+    assert sheet["C3"].value == "=$A$1*B3"
+    assert sheet["C4"].value == "=汇总!A2*B4"  # 跨 sheet 相对引用也会被平移（已锁定语义）
+    assert sheet["C5"].value == "=B5+C5"
+    workbook.close()
+
+
+def test_merge_extends_chart_data_ranges(tmp_path):
+    from openpyxl.chart import BarChart, Reference
+
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {
+            "数据": [["类别", "值"], ["甲", 1], ["乙", 2], ["丙", 3], ["丁", 4]],
+            "汇总": [["指标"], [100]],
+        },
+    )
+    workbook = load_workbook(file_a)
+    data_ws = workbook["数据"]
+    # 图表放在被合并的「数据」上，引用「数据」的 A2:A5 / B2:B5
+    chart_on_data = BarChart()
+    chart_on_data.add_data(Reference(data_ws, min_col=2, min_row=2, max_row=5), titles_from_data=False)
+    chart_on_data.set_categories(Reference(data_ws, min_col=1, min_row=2, max_row=5))
+    data_ws.add_chart(chart_on_data, "E2")
+    # 图表放在未被合并的「汇总」上，但引用被合并的「数据」
+    chart_on_summary = BarChart()
+    chart_on_summary.add_data(Reference(data_ws, min_col=2, min_row=2, max_row=5), titles_from_data=False)
+    workbook["汇总"].add_chart(chart_on_summary, "C2")
+    # 引用「汇总」自身（该 sheet 标记 identical 不追加）的图表不应变化
+    chart_self = BarChart()
+    chart_self.add_data(Reference(workbook["汇总"], min_col=1, min_row=2, max_row=2), titles_from_data=False)
+    workbook["汇总"].add_chart(chart_self, "C20")
+    workbook.save(file_a)
+    workbook.close()
+
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {"数据": [["类别", "值"], ["戊", 5], ["己", 6], ["庚", 7]]},
+    )
+    output = tmp_path / "合并结果.xlsx"
+    job = MergeJob(
+        input_files=(file_a, file_b),
+        output_file=output,
+        sheet_configs=(
+            MergeSheetConfig("数据"),
+            MergeSheetConfig("汇总", identical=True),
+        ),
+    )
+
+    MergeEngine().execute(job)
+
+    workbook = load_workbook(output)
+    data_charts = workbook["数据"]._charts
+    assert len(data_charts) == 1
+    series = data_charts[0].series[0]
+    # 追加 3 行后数据末行从 5 延伸到 8
+    assert series.val.numRef.f == "'数据'!$B$2:$B$8"
+    assert series.cat.numRef.f == "'数据'!$A$2:$A$8"
+    summary_charts = workbook["汇总"]._charts
+    assert len(summary_charts) == 2
+    # 未合并 sheet 上的图表，引用被合并 sheet 的也被延伸
+    assert summary_charts[0].series[0].val.numRef.f == "'数据'!$B$2:$B$8"
+    # identical sheet 未被追加，引用自身的图表不动（openpyxl 会把单单元格区域折叠成单格引用）
+    assert summary_charts[1].series[0].val.numRef.f == "'汇总'!$A$2"
+    workbook.close()
