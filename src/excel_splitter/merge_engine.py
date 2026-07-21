@@ -10,6 +10,7 @@ from zipfile import ZipFile
 from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import range_boundaries
 
 from .excel_io import load_workbook_with_warnings
 from .merge_models import MergeJob, MergeSheetResult, MergeSummary
@@ -188,14 +189,14 @@ class MergeEngine:
         consecutive_empty = 0
 
         if not initialized:
-            # write_only 模式下 <cols> 在首次 append 时写出，列宽必须先于任何行写入
-            _apply_column_widths(out_sheet, input_file, sheet_plan)
+            # write_only 模式下 <cols>/行高在首次 append 时写出，布局必须先于任何行写入
+            _apply_sheet_layout(out_sheet, input_file, sheet_plan)
 
         if initialized:
-            data_rows = sheet.iter_rows(min_row=header_row + 1, values_only=True)
+            data_rows = sheet.iter_rows(min_row=header_row + 1)
             for row in data_rows:
                 values, is_empty = _map_row(
-                    row, mapping, column_count, job, input_file
+                    row, mapping, column_count, job, input_file, out_sheet
                 )
                 added, consecutive_empty, stopped = _append_data_row(
                     out_sheet, values, is_empty, added, consecutive_empty
@@ -213,12 +214,14 @@ class MergeEngine:
             # 第一个包含该 sheet 的文件：先写标题区域和表头，再写数据
             for row_index, row in enumerate(sheet.iter_rows(min_row=1), start=1):
                 if row_index < header_row:
-                    out_sheet.append([cell.value for cell in row])
+                    out_sheet.append(
+                        [_styled_cell(out_sheet, cell) for cell in row]
+                    )
                 elif row_index == header_row:
                     _write_union_header(out_sheet, sheet_plan, job, row)
                 else:
                     values, is_empty = _map_row(
-                        [cell.value for cell in row], mapping, column_count, job, input_file
+                        row, mapping, column_count, job, input_file, out_sheet
                     )
                     added, consecutive_empty, stopped = _append_data_row(
                         out_sheet, values, is_empty, added, consecutive_empty
@@ -255,19 +258,38 @@ def _fingerprint_token(value) -> bytes:
     return b"\x01" + f"{type(value).__name__}:{value}".encode("utf-8", "replace") + b"\x1f"
 
 
-def _map_row(row, mapping, column_count, job: MergeJob, input_file: Path):
-    """按表头名把一行数据映射到并集列序，返回（输出行, 是否整行为空）。"""
+def _map_row(cells, mapping, column_count, job: MergeJob, input_file: Path, out_sheet):
+    """按表头名把一行数据映射到并集列序，返回（输出行, 是否整行为空）。
+
+    单元格样式（字体/填充/边框/对齐/数字格式/保护）跟随源单元格复制；
+    带样式的空单元格也会写入（保留边框等视觉效果）。
+    """
     values = [None] * column_count
-    for index, value in enumerate(row):
+    is_empty = True
+    for index, cell in enumerate(cells):
         if index >= len(mapping):
             break
         union_index = mapping[index]
-        if union_index is not None:
-            values[union_index] = value
-    is_empty = all(normalize_split_value(value) is None for value in values)
+        if union_index is None:
+            continue
+        value = cell.value
+        if normalize_split_value(value) is not None:
+            is_empty = False
+        if value is None and not getattr(cell, "has_style", False):
+            continue
+        values[union_index] = _styled_cell(out_sheet, cell)
     if not is_empty and job.include_source_column:
         values[-1] = input_file.stem
     return values, is_empty
+
+
+def _styled_cell(out_sheet, source_cell):
+    """把源单元格转成输出单元格：无样式时只写值，有样式时连样式一起复制。"""
+    if not getattr(source_cell, "has_style", False):
+        return source_cell.value
+    cell = WriteOnlyCell(out_sheet, value=source_cell.value)
+    _copy_cell_style(source_cell, cell)
+    return cell
 
 
 def _append_data_row(out_sheet, values, is_empty, added, consecutive_empty):
@@ -296,81 +318,109 @@ def _write_union_header(out_sheet, sheet_plan: MergeSheetPlan, job: MergeJob, he
         cell = WriteOnlyCell(out_sheet, value=header)
         source = style_source.get(header, fallback_style)
         if source is not None:
-            _copy_header_style(source, cell)
+            _copy_cell_style(source, cell)
         cells.append(cell)
     out_sheet.append(cells)
 
 
-def _copy_header_style(source_cell, target_cell) -> None:
+def _copy_cell_style(source_cell, target_cell) -> None:
     try:
         target_cell.font = copy(source_cell.font)
         target_cell.fill = copy(source_cell.fill)
         target_cell.alignment = copy(source_cell.alignment)
         target_cell.border = copy(source_cell.border)
+        target_cell.protection = copy(source_cell.protection)
+        if source_cell.number_format:
+            target_cell.number_format = source_cell.number_format
     except Exception:
         pass  # 复制不了的样式项直接放弃，不影响合并结果
 
 
-def _apply_column_widths(out_sheet, input_file: Path, sheet_plan: MergeSheetPlan) -> None:
+def _apply_sheet_layout(out_sheet, input_file: Path, sheet_plan: MergeSheetPlan) -> None:
+    """从基准文件复制 sheet 布局：列宽、行高、冻结窗格、标题区合并单元格。"""
+    layout = _read_sheet_layout(input_file, sheet_plan.sheet_name, sheet_plan.header_row)
     base_headers = sheet_plan.headers_by_file[sheet_plan.base_file]
-    widths = _read_column_widths(input_file, sheet_plan.sheet_name)
     for out_index, header in enumerate(sheet_plan.union_headers, start=1):
         try:
             base_index = base_headers.index(header)
         except ValueError:
             continue
-        width = widths.get(get_column_letter(base_index + 1))
+        width = layout["widths"].get(get_column_letter(base_index + 1))
         if width:
             out_sheet.column_dimensions[get_column_letter(out_index)].width = width
+    for row_number, height in layout["row_heights"].items():
+        out_sheet.row_dimensions[row_number].height = height
+    if layout["freeze_panes"]:
+        out_sheet.freeze_panes = layout["freeze_panes"]
+    for ref in layout["merges"]:
+        try:
+            _min_col, _min_row, _max_col, max_row = range_boundaries(ref)
+        except ValueError:
+            continue
+        if max_row < sheet_plan.header_row:  # 只保留标题区（表头行之上）的合并
+            # WriteOnlyWorksheet 没有 merge_cells 方法，但 merged_cells.add 可用（已实测）
+            out_sheet.merged_cells.add(ref)
 
 
-def _read_column_widths(path: Path, sheet_name: str) -> dict[str, float]:
-    """直接从 xlsx 压缩包解析列宽（read_only 模式不提供 column_dimensions）。
-
-    解析失败时返回空字典，列宽复制直接放弃，不影响合并结果。
-    """
+def _sheet_archive_entry(archive: ZipFile, sheet_name: str) -> str | None:
+    """在 xlsx 压缩包里定位指定 sheet 的 XML 条目。"""
     main_ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
     rel_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+    workbook_xml = ElementTree.fromstring(archive.read("xl/workbook.xml"))
+    rel_id = None
+    for sheet_node in workbook_xml.iter(f"{main_ns}sheet"):
+        if sheet_node.get("name") == sheet_name:
+            rel_id = sheet_node.get(f"{rel_ns}id")
+            break
+    if rel_id is None:
+        return None
+    rels_xml = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+    for rel_node in rels_xml:
+        if rel_node.get("Id") == rel_id:
+            target = rel_node.get("Target")
+            if target:
+                return target.lstrip("/") if target.startswith("/") else f"xl/{target}"
+    return None
+
+
+def _read_sheet_layout(path: Path, sheet_name: str, header_row: int) -> dict:
+    """直接从 xlsx 压缩包解析 sheet 布局（read_only 模式不提供这些属性）。
+
+    解析列宽、冻结窗格、前 header_row 行的行高、标题区合并单元格。
+    解析失败时返回空布局，对应项直接放弃，不影响合并结果。
+    """
+    main_ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    layout: dict = {"widths": {}, "freeze_panes": None, "row_heights": {}, "merges": []}
     try:
         with ZipFile(path, "r") as archive:
-            workbook_xml = ElementTree.fromstring(archive.read("xl/workbook.xml"))
-            rel_id = None
-            for sheet_node in workbook_xml.iter(f"{main_ns}sheet"):
-                if sheet_node.get("name") == sheet_name:
-                    rel_id = sheet_node.get(f"{rel_ns}id")
-                    break
-            if rel_id is None:
-                return {}
-            rels_xml = ElementTree.fromstring(
-                archive.read("xl/_rels/workbook.xml.rels")
-            )
-            target = None
-            for rel_node in rels_xml:
-                if rel_node.get("Id") == rel_id:
-                    target = rel_node.get("Target")
-                    break
-            if not target:
-                return {}
-            sheet_entry = (
-                target.lstrip("/") if target.startswith("/") else f"xl/{target}"
-            )
-            widths: dict[str, float] = {}
+            sheet_entry = _sheet_archive_entry(archive, sheet_name)
+            if sheet_entry is None:
+                return layout
             with archive.open(sheet_entry) as stream:
-                for event, node in ElementTree.iterparse(
-                    stream, events=("start", "end")
-                ):
-                    if event == "start" and node.tag == f"{main_ns}sheetData":
-                        break  # <cols> 一定位于 <sheetData> 之前，此后无需再读
-                    if event == "end" and node.tag == f"{main_ns}col":
+                for event, node in ElementTree.iterparse(stream, events=("start", "end")):
+                    tag = node.tag
+                    if event == "start" and tag == f"{main_ns}pane":
+                        if node.get("state") == "frozen":
+                            layout["freeze_panes"] = node.get("topLeftCell")
+                    elif event == "end" and tag == f"{main_ns}col":
                         width = float(node.get("width", 0))
                         if width:
                             for column in range(
                                 int(node.get("min")), int(node.get("max")) + 1
                             ):
-                                widths[get_column_letter(column)] = width
-            return widths
+                                layout["widths"][get_column_letter(column)] = width
+                    elif event == "start" and tag == f"{main_ns}row":
+                        height = node.get("ht")
+                        row_number = int(node.get("r", 0))
+                        if height and row_number <= header_row:
+                            layout["row_heights"][row_number] = float(height)
+                    elif event == "end" and tag == f"{main_ns}mergeCell":
+                        ref = node.get("ref")
+                        if ref:
+                            layout["merges"].append(ref)
     except Exception:
-        return {}
+        pass
+    return layout
 
 
 class _ProgressReporter:

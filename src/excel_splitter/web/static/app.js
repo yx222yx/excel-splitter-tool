@@ -550,17 +550,68 @@ byId("merge-to-fields").addEventListener("click", () => {
   const selected = mergeSelectedSheets();
   if (!selected.length) return showAlert("至少选择一个 Sheet");
   mergeState.selectedSheets = selected;
-  byId("merge-sheet-configs").innerHTML = selected.map((name) => `<div class="merge-sheet-config" data-sheet="${escapeHtml(name)}"><span class="merge-file-name">${escapeHtml(name)}</span><label>表头行<input type="number" class="merge-header-row" min="1" max="15" value="1"></label></div>`).join("");
+  // 只渲染卡片骨架，预览懒加载（展开时才请求），避免多 sheet 时一次性渲染卡顿
+  byId("merge-sheet-configs").innerHTML = selected.map((name) => `<article class="merge-sheet-card" data-sheet="${escapeHtml(name)}" data-header-row="1"><header class="merge-card-header"><strong>${escapeHtml(name)}</strong><span class="muted merge-card-source">预览取自第一个包含该 Sheet 的文件</span><span class="muted merge-card-choice">表头行：第 1 行</span><button type="button" class="secondary small merge-card-toggle">展开预览</button></header><div class="merge-card-preview" hidden></div></article>`).join("");
   byId("merge-plan-results").innerHTML = "";
   mergeState.maxStep = Math.max(mergeState.maxStep, 3);
   mergeGoStep(3);
 });
 
 function mergeSheetConfigs() {
-  return [...document.querySelectorAll(".merge-sheet-config")].map((row) => ({
-    sheet_name: row.dataset.sheet,
-    header_row: Number(row.querySelector(".merge-header-row").value) || 1,
+  return [...document.querySelectorAll(".merge-sheet-card")].map((card) => ({
+    sheet_name: card.dataset.sheet,
+    header_row: Number(card.dataset.headerRow) || 1,
   }));
+}
+
+byId("merge-sheet-configs").addEventListener("click", async (event) => {
+  const toggle = event.target.closest(".merge-card-toggle");
+  if (toggle) {
+    const card = toggle.closest(".merge-sheet-card");
+    const previewBox = card.querySelector(".merge-card-preview");
+    if (!previewBox.hidden) {
+      previewBox.hidden = true;
+      toggle.textContent = "展开预览";
+      return;
+    }
+    if (!previewBox.dataset.loaded) {
+      try {
+        const payload = await mergeApi("/api/merge/preview", { job_id: mergeState.jobId, sheet_name: card.dataset.sheet, max_rows: 50 });
+        previewBox.innerHTML = renderMergePreviewTable(payload);
+        previewBox.dataset.loaded = "1";
+        card.querySelector(".merge-card-source").textContent = `预览来源：${payload.source_file}`;
+        markMergeHeaderRow(card);
+      } catch (error) {
+        showAlert(error.message);
+        return;
+      }
+    }
+    previewBox.hidden = false;
+    toggle.textContent = "收起预览";
+    return;
+  }
+  const row = event.target.closest("tr[data-row]");
+  if (row) {
+    const card = row.closest(".merge-sheet-card");
+    card.dataset.headerRow = row.dataset.row;
+    card.querySelector(".merge-card-choice").textContent = `表头行：第 ${row.dataset.row} 行`;
+    markMergeHeaderRow(card);
+  }
+});
+
+function renderMergePreviewTable(preview) {
+  const body = preview.rows.map((row, index) => `<tr data-row="${index + 1}"><th class="row-number">${index + 1}</th>${row.map((value) => `<td>${escapeHtml(value)}</td>`).join("")}</tr>`).join("");
+  return `<div class="preview-meta">共 ${preview.total_rows} 行，点击某一行将其设为表头行</div><div class="preview-wrap merge-preview-wrap"><table class="preview-table merge-preview-table"><tbody>${body}</tbody></table></div>`;
+}
+
+function markMergeHeaderRow(card) {
+  const headerRow = Number(card.dataset.headerRow) || 1;
+  card.querySelectorAll("tr[data-row]").forEach((tr) => {
+    const isHeader = Number(tr.dataset.row) === headerRow;
+    tr.classList.toggle("merge-header-selected", isHeader);
+    const numberCell = tr.querySelector(".row-number");
+    if (numberCell) numberCell.textContent = isHeader ? `${tr.dataset.row} · 表头` : tr.dataset.row;
+  });
 }
 
 byId("merge-check-plan").addEventListener("click", async () => {
@@ -576,15 +627,34 @@ function renderMergePlan(plan) {
     Object.entries(sheet.missing_fields).forEach(([file, fields]) => issues.push(`文件 ${escapeHtml(file)} 缺少字段：${escapeHtml(fields.join("、"))}，对应列将留空`));
     Object.entries(sheet.extra_fields).forEach(([file, fields]) => issues.push(`文件 ${escapeHtml(file)} 多出字段：${escapeHtml(fields.join("、"))}，将追加到表头末尾`));
     sheet.missing_files.forEach((file) => issues.push(`文件 ${escapeHtml(file)} 没有该 Sheet，将跳过`));
-    const body = issues.length
-      ? `<ul>${issues.map((line) => `<li>${line}</li>`).join("")}</ul>`
-      : `<div class="muted">所有文件字段一致</div>`;
-    return `<article class="merge-plan-sheet"><h2>${escapeHtml(sheet.sheet_name)}（并集 ${sheet.union_headers.length} 个字段）</h2>${body}</article>`;
+    const title = `<h2>${escapeHtml(sheet.sheet_name)}（并集 ${sheet.union_headers.length} 个字段）</h2>`;
+    if (!issues.length) {
+      return `<article class="merge-plan-sheet">${title}<div class="muted">所有文件字段一致</div></article>`;
+    }
+    return `<article class="merge-plan-sheet">${title}${renderMergeFieldMatrix(sheet)}<ul>${issues.map((line) => `<li>${line}</li>`).join("")}</ul></article>`;
   }).join("");
   const warnings = (plan.warnings || []).length
     ? `<div class="warning-list">${plan.warnings.map((message) => `<div>${escapeHtml(message)}</div>`).join("")}</div>`
     : "";
   byId("merge-plan-results").innerHTML = sheets + warnings;
+}
+
+function renderMergeFieldMatrix(sheet) {
+  const files = mergeState.files.map((file) => file.filename);
+  const header = `<tr><th>文件</th>${sheet.union_headers.map((field) => `<th>${escapeHtml(field)}</th>`).join("")}</tr>`;
+  const body = files.map((name) => {
+    if (sheet.missing_files.includes(name)) {
+      return `<tr><td class="merge-matrix-file">${escapeHtml(name)}</td><td class="merge-field-missing" colspan="${sheet.union_headers.length}">没有该 Sheet</td></tr>`;
+    }
+    const missing = sheet.missing_fields[name] || [];
+    const cells = sheet.union_headers.map((field) => (
+      missing.includes(field)
+        ? `<td class="merge-field-missing">—</td>`
+        : `<td class="merge-field-has">✓</td>`
+    )).join("");
+    return `<tr><td class="merge-matrix-file">${escapeHtml(name)}</td>${cells}</tr>`;
+  }).join("");
+  return `<div class="merge-matrix-wrap"><table class="merge-field-matrix">${header}${body}</table></div>`;
 }
 
 function mergeParentDir(path) {

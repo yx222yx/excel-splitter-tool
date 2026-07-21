@@ -13,7 +13,7 @@ from ..excel_io import load_workbook_with_warnings
 from ..merge_engine import MergeEngine
 from ..merge_models import MergeJob, MergeSheetConfig, MergeSummary
 from ..merge_planning import MergePlan, build_merge_plan
-from .routes import _jobs, _json_payload, _required_text
+from .routes import _jobs, _json_payload, _json_value, _required_text
 
 
 merge_api = Blueprint("excel_splitter_merge", __name__, url_prefix="/api/merge")
@@ -171,6 +171,42 @@ def list_sheets():
         finally:
             workbook.close()
     return jsonify(sheets=sheets)
+
+
+@merge_api.post("/preview")
+def merge_preview():
+    """预览某个 sheet 的前若干行（取自第一个包含该 sheet 的已解密文件）。"""
+    payload = _json_payload()
+    job = _get_merge_job(payload.get("job_id"))
+    sheet_name = _required_text(payload, "sheet_name")
+    try:
+        max_rows = max(1, int(payload.get("max_rows", 50) or 50))
+    except (TypeError, ValueError):
+        raise ValueError("max_rows 必须是数字")
+    for item in job["files"]:
+        if item["encrypted"]:
+            continue  # 未解密的文件无法读取，跳过
+        workbook, _ = load_workbook_with_warnings(
+            Path(item["stored_path"]), data_only=True, read_only=True
+        )
+        try:
+            if sheet_name not in workbook.sheetnames:
+                continue
+            sheet = workbook[sheet_name]
+            rows = [
+                [_json_value(value) for value in row]
+                for row in sheet.iter_rows(min_row=1, max_row=max_rows, values_only=True)
+            ]
+            return jsonify(
+                sheet_name=sheet_name,
+                source_file=item["filename"],
+                rows=rows,
+                total_rows=sheet.max_row or len(rows),
+                max_rows=max_rows,
+            )
+        finally:
+            workbook.close()
+    raise ValueError(f"没有文件包含 sheet：{sheet_name}")
 
 
 @merge_api.post("/plan")

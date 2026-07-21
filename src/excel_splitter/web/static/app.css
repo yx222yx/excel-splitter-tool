@@ -174,3 +174,22 @@ select, input[type="text"] { min-height: 40px; width: 100%; border: 1px solid #a
   .merge-file-row { grid-template-columns: 1fr; }
   .merge-sheet-config { flex-wrap: wrap; }
 }
+
+/* ===== 合并字段检查卡片与字段矩阵 ===== */
+.merge-sheet-card { padding: 14px 16px; background: #fff; border: 1px solid #d4dbe0; border-radius: 6px; }
+.merge-card-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.merge-card-header strong { font-size: 15px; }
+.merge-card-source, .merge-card-choice { font-size: 12px; }
+.merge-card-toggle { margin-left: auto; }
+.merge-card-preview { margin-top: 10px; }
+.merge-preview-wrap { height: min(320px, 45vh); min-height: 160px; }
+.merge-preview-table tbody tr { cursor: pointer; }
+.merge-header-selected td, .merge-header-selected th.row-number { background: #e2f2ea; font-weight: 600; }
+
+.merge-matrix-wrap { overflow: auto; margin: 8px 0 10px; }
+.merge-field-matrix { border-collapse: collapse; font-size: 13px; white-space: nowrap; }
+.merge-field-matrix th, .merge-field-matrix td { border: 1px solid #d9dfe3; padding: 6px 10px; text-align: center; }
+.merge-field-matrix th { background: #edf5f1; color: #315448; }
+.merge-field-matrix .merge-matrix-file { text-align: left; }
+.merge-field-has { color: #176b57; font-weight: 700; }
+.merge-field-missing { color: #bd3f38; background: #fff6f5; }

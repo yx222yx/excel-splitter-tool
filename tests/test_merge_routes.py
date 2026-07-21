@@ -415,3 +415,31 @@ def test_execute_skip_duplicate_sheets_param(tmp_path):
     result = disabled_run.get_json()["results"][0]
     assert result["merged_rows"] == 4
     assert result["skipped_duplicates"] == {}
+
+
+def test_merge_preview_returns_first_rows_from_first_file(tmp_path):
+    client = _app(tmp_path).test_client()
+    loaded = _upload(
+        client,
+        [
+            (_xlsx_bytes({"工时": [["姓名", "工时"], ["张三", 8], ["李四", 7]]}), "部门A.xlsx"),
+            (_xlsx_bytes({"工时": [["姓名", "工时"], ["王五", 6]]}), "部门B.xlsx"),
+        ],
+    )
+    job_id = loaded.get_json()["job_id"]
+
+    response = client.post(
+        "/api/merge/preview", json={"job_id": job_id, "sheet_name": "工时"}
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["source_file"] == "部门A.xlsx"
+    assert payload["total_rows"] == 3
+    assert payload["rows"] == [["姓名", "工时"], ["张三", 8], ["李四", 7]]
+
+    missing = client.post(
+        "/api/merge/preview", json={"job_id": job_id, "sheet_name": "不存在"}
+    )
+    assert missing.status_code == 400
+    assert "没有文件包含 sheet" in missing.get_json()["error"]

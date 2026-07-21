@@ -424,3 +424,103 @@ def test_merge_does_not_treat_different_column_order_as_duplicate(tmp_path):
     result = summary.results[0]
     assert result.skipped_duplicates == {}
     assert result.merged_rows == 2
+
+
+def test_merge_preserves_data_cell_styles(tmp_path):
+    from datetime import datetime
+
+    from openpyxl.styles import Font, PatternFill
+
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {"工时": [["姓名", "工时", "日期"], ["张三", 8, datetime(2026, 7, 1)]]},
+    )
+    workbook = load_workbook(file_a)
+    sheet = workbook["工时"]
+    sheet["A2"].font = Font(bold=True, color="FF0000")
+    sheet["A2"].fill = PatternFill("solid", fgColor="FFFF00")
+    sheet["B2"].number_format = "#,##0.0"
+    sheet["C2"].number_format = "yyyy-mm-dd"
+    workbook.save(file_a)
+    workbook.close()
+
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {"工时": [["姓名", "工时", "日期"], ["李四", 7, None]]},
+    )
+    workbook = load_workbook(file_b)
+    workbook["工时"]["A2"].font = Font(italic=True)
+    workbook.save(file_b)
+    workbook.close()
+
+    output = tmp_path / "合并结果.xlsx"
+    job = MergeJob(
+        input_files=(file_a, file_b),
+        output_file=output,
+        sheet_configs=(MergeSheetConfig("工时"),),
+    )
+    MergeEngine().execute(job)
+
+    workbook = load_workbook(output)
+    sheet = workbook["工时"]
+    assert sheet["A2"].font.bold
+    assert sheet["A2"].font.color.rgb.endswith("FF0000")
+    assert sheet["A2"].fill.fgColor.rgb.endswith("FFFF00")
+    assert sheet["B2"].number_format == "#,##0.0"
+    assert sheet["C2"].number_format == "yyyy-mm-dd"
+    # 第二个文件的数据行保留自己的样式
+    assert sheet["A3"].font.italic
+    assert not sheet["A3"].font.bold
+    workbook.close()
+
+
+def test_merge_preserves_title_merge_freeze_and_row_height(tmp_path):
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {
+            "工时": [
+                ["2026 年 7 月工时汇总", None, None],
+                ["姓名", "项目", "工时"],
+                ["张三", "项目甲", 8],
+            ]
+        },
+    )
+    workbook = load_workbook(file_a)
+    sheet = workbook["工时"]
+    sheet.merge_cells("A1:C1")
+    sheet["A1"].font = Font(bold=True, size=14)
+    sheet.row_dimensions[1].height = 30
+    sheet.row_dimensions[2].height = 22
+    sheet.freeze_panes = "A3"
+    workbook.save(file_a)
+    workbook.close()
+
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {
+            "工时": [
+                ["部门B 的标题", None, None],
+                ["姓名", "项目", "工时"],
+                ["李四", "项目乙", 7],
+            ]
+        },
+    )
+    output = tmp_path / "合并结果.xlsx"
+    job = MergeJob(
+        input_files=(file_a, file_b),
+        output_file=output,
+        sheet_configs=(MergeSheetConfig("工时", header_row=2),),
+    )
+    summary = MergeEngine().execute(job)
+
+    assert summary.errors == []
+    workbook = load_workbook(output)
+    sheet = workbook["工时"]
+    assert sheet["A1"].value == "2026 年 7 月工时汇总"
+    assert sheet["A1"].font.bold
+    assert "A1:C1" in {str(item) for item in sheet.merged_cells.ranges}
+    assert sheet.row_dimensions[1].height == 30
+    assert sheet.row_dimensions[2].height == 22
+    assert sheet.freeze_panes == "A3"
+    assert sheet["A4"].value == "李四"
+    workbook.close()
