@@ -32,7 +32,7 @@ def test_portable_build_assets_exist_and_target_onedir_windowed_app():
     assert "webview.platforms.edgechromium" in spec
     assert "webview.platforms.winforms" in spec
     assert "collect_submodules('webview')" not in spec
-    assert "name='Excel拆分工具'" in spec
+    assert "name='Excel拆并表工具'" in spec
     assert "console=False" in spec
     assert "COLLECT(" in spec
     assert "PyInstaller" in build_script

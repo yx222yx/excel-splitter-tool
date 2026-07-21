@@ -18,7 +18,7 @@ from .web.app import create_app
 
 HOST = "127.0.0.1"
 MUTEX_NAME = r"Local\ExcelSplitterTool"
-WINDOW_TITLE = "Excel 拆分工具"
+WINDOW_TITLE = "Excel 拆并表工具"
 
 
 def _create_waitress_server(app, **kwargs):
@@ -172,7 +172,7 @@ def main() -> int:
     try:
         configure_logging()
         if not instance.acquire():
-            _show_message(WINDOW_TITLE, "Excel 拆分工具已经在运行。")
+            _show_message(WINDOW_TITLE, "Excel 拆并表工具已经在运行。")
             return 0
         output_dir = user_output_dir()
         output_dir.mkdir(parents=True, exist_ok=True)

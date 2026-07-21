@@ -1,4 +1,4 @@
-# Excel 通用拆表工具
+# Excel 拆并表工具
 
 本地运行的 `.xlsx` 多 Sheet 拆分/合并工具。纯本地运行，不上传任何数据。
 
@@ -94,7 +94,7 @@ D:\conda_envs\edc\python.exe -m excel_splitter.desktop
 构建产物：
 
 ```text
-dist\Excel拆分工具\Excel拆分工具.exe
+dist\Excel拆并表工具\Excel拆并表工具.exe
 dist\ExcelSplitter-portable.zip
 ```
 

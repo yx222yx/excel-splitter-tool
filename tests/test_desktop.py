@@ -107,7 +107,7 @@ def test_run_window_enables_downloads_and_always_stops_server():
     run_window(server, webview_module=webview)
 
     args, kwargs = webview.window_args
-    assert args == ("Excel 拆分工具", "http://127.0.0.1:43123/")
+    assert args == ("Excel 拆并表工具", "http://127.0.0.1:43123/")
     assert kwargs["width"] == 1180
     assert kwargs["height"] == 800
     assert kwargs["min_size"] == (900, 640)

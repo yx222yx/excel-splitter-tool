@@ -34,7 +34,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='Excel拆分工具',
+    name='Excel拆并表工具',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -49,5 +49,5 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name='Excel拆分工具',
+    name='Excel拆并表工具',
 )
