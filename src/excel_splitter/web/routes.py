@@ -15,8 +15,8 @@ from flask import Blueprint, current_app, jsonify, render_template, request, url
 from ..encryption import decrypt_file, encrypt_file, is_encrypted
 from ..engine import SplitEngine
 from ..excel_io import load_workbook_with_warnings
-from ..models import SheetConfig, SplitJob
-from ..planning import SplitPlan, build_split_plan
+from ..models import MAX_HEADER_ROW, SheetConfig, SplitJob
+from ..planning import SplitPlan, _detect_blocks, build_split_plan
 from ..preview import preview_sheet
 from .dialogs import choose_directory
 
@@ -206,6 +206,53 @@ def _block_header_preview(sheet, block_header: int) -> str:
         if len(values) >= 3:
             break
     return " / ".join(values)
+
+
+@api.post("/api/sheet-blocks")
+def sheet_blocks():
+    """对单个 sheet 做表区检测（用户手动标记后按需调用，read_only 流式）。"""
+    payload = _json_payload()
+    job = _get_job(payload.get("job_id"))
+    sheet_name = _required_text(payload, "sheet_name")
+    try:
+        header_row = int(payload.get("header_row", 1))
+    except (TypeError, ValueError):
+        raise ValueError("表头行必须是数字")
+    if header_row < 1 or header_row > MAX_HEADER_ROW:
+        raise ValueError(f"表头行必须位于前 {MAX_HEADER_ROW} 行")
+
+    workbook, _ = load_workbook_with_warnings(
+        job["input_file"], data_only=True, read_only=True
+    )
+    try:
+        if sheet_name not in workbook.sheetnames:
+            raise ValueError(f"找不到 sheet：{sheet_name}")
+        sheet = workbook[sheet_name]
+        if sheet.max_row is not None and header_row > sheet.max_row:
+            raise ValueError(f"{sheet_name} 的表头行超出有效范围")
+        blocks = _detect_blocks(sheet, header_row)
+        result = []
+        for block_header, data_start, data_end in blocks:
+            preview_row = next(
+                sheet.iter_rows(min_row=block_header, max_row=block_header, values_only=True)
+            )
+            preview_values = [
+                str(value).strip()
+                for value in preview_row
+                if value is not None and str(value).strip()
+            ][:3]
+            result.append(
+                {
+                    "header_row": block_header,
+                    "data_start": data_start,
+                    "data_end": data_end,
+                    "data_rows": max(0, data_end - data_start + 1),
+                    "header_preview": " / ".join(preview_values),
+                }
+            )
+    finally:
+        workbook.close()
+    return jsonify(sheet_name=sheet_name, blocks=result)
 
 
 @api.post("/api/execute")
@@ -434,6 +481,7 @@ def _sheet_configs(raw_configs: Any) -> tuple[SheetConfig, ...]:
                     if isinstance(raw_strategies, list)
                     else ()
                 ),
+                has_sub_blocks=bool(raw.get("has_sub_blocks", False)),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("sheet 配置缺少有效的表头行或拆分列") from exc

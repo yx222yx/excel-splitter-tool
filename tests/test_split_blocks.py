@@ -46,7 +46,11 @@ def _job(input_file: Path, output_dir: Path, value: str, strategies=()) -> Split
         input_file=input_file,
         output_dir=output_dir,
         sheet_configs=(
-            SheetConfig("概览", 2, 1, "A - 团队", block_strategies=tuple(strategies)),
+            SheetConfig(
+                "概览", 2, 1, "A - 团队",
+                block_strategies=tuple(strategies),
+                has_sub_blocks=True,
+            ),
         ),
         split_mode="selected",
         selected_split_values=(value,),
@@ -75,17 +79,49 @@ def test_plan_detects_single_block_sheet(tmp_path):
     workbook.save(path)
     workbook.close()
 
-    plan = build_split_plan(path, (SheetConfig("数据", 1, 1),))
+    plan = build_split_plan(path, (SheetConfig("数据", 1, 1, has_sub_blocks=True),))
 
     assert plan.blocks["数据"] == [(1, 2, 3)]
 
 
 def test_plan_detects_multi_blocks_with_gap_and_total_row(tmp_path):
     plan = build_split_plan(
-        _block_workbook(tmp_path), (SheetConfig("概览", 2, 1),)
+        _block_workbook(tmp_path), (SheetConfig("概览", 2, 1, has_sub_blocks=True),)
     )
 
     assert plan.blocks["概览"] == [(2, 3, 6), (8, 9, 10), (12, 13, 15)]
+
+
+def test_plan_skips_detection_unless_marked(tmp_path, monkeypatch):
+    import excel_splitter.planning as planning_module
+
+    calls = []
+    original = planning_module._detect_blocks
+    monkeypatch.setattr(
+        planning_module,
+        "_detect_blocks",
+        lambda sheet, header_row: (calls.append(header_row), original(sheet, header_row))[1],
+    )
+    source = _block_workbook(tmp_path)
+
+    # 未标记：零检测
+    plan = build_split_plan(source, (SheetConfig("概览", 2, 1),))
+    assert calls == []
+    assert plan.blocks == {}
+
+    # full 模式即使标记也跳过
+    plan = build_split_plan(
+        source, (SheetConfig("概览", 2, 1, mode="full", has_sub_blocks=True),)
+    )
+    assert calls == []
+    assert plan.blocks == {}
+
+    # 标记且非 full：检测一次
+    plan = build_split_plan(
+        source, (SheetConfig("概览", 2, 1, has_sub_blocks=True),)
+    )
+    assert calls == [2]
+    assert len(plan.blocks["概览"]) == 3
 
 
 def test_follow_split_keeps_block_headers_and_gap_rows(tmp_path):
@@ -187,7 +223,7 @@ def test_linked_mode_applies_block_logic(tmp_path):
         output_dir=tmp_path / "输出",
         sheet_configs=(
             SheetConfig("归属", 1, 1, "A - 团队", mode="reference", key_column_idx=2),
-            SheetConfig("明细", 1, None, mode="linked", key_column_idx=2),
+            SheetConfig("明细", 1, None, mode="linked", key_column_idx=2, has_sub_blocks=True),
         ),
         split_mode="selected",
         selected_split_values=("甲",),
@@ -229,6 +265,7 @@ def test_routes_return_block_info_and_pass_strategies(tmp_path):
         "split_column_idx": 1,
         "split_column_label": "A - 团队",
         "mode": "direct",
+        "has_sub_blocks": True,
     }
 
     values = client.post(
@@ -263,3 +300,59 @@ def test_routes_return_block_info_and_pass_strategies(tmp_path):
     workbook.close()
     # drop 策略透传生效：小表2 整块消失
     assert rows == ["年度概览", "团队", "甲", None, "负责人", "甲", "甲"]
+
+
+def test_sheet_blocks_endpoint_and_split_values_gating(tmp_path):
+    from io import BytesIO
+
+    client = _app(tmp_path).test_client()
+    source = _block_workbook(tmp_path)
+    with source.open("rb") as handle:
+        loaded = client.post(
+            "/api/load",
+            data={"file": (BytesIO(handle.read()), "多表区.xlsx")},
+            content_type="multipart/form-data",
+        )
+    job_id = loaded.get_json()["job_id"]
+
+    # /api/sheet-blocks 正常返回
+    response = client.post(
+        "/api/sheet-blocks",
+        json={"job_id": job_id, "sheet_name": "概览", "header_row": 2},
+    )
+    assert response.status_code == 200
+    blocks = response.get_json()["blocks"]
+    assert [(b["header_row"], b["data_start"], b["data_end"]) for b in blocks] == [
+        (2, 3, 6),
+        (8, 9, 10),
+        (12, 13, 15),
+    ]
+    assert blocks[1]["header_preview"] == "负责人 / 人数"
+    assert blocks[1]["data_rows"] == 2
+
+    # 400 分支：sheet 不存在 / 表头行非法
+    missing = client.post(
+        "/api/sheet-blocks",
+        json={"job_id": job_id, "sheet_name": "不存在", "header_row": 1},
+    )
+    assert missing.status_code == 400
+    assert "找不到 sheet" in missing.get_json()["error"]
+    bad_row = client.post(
+        "/api/sheet-blocks",
+        json={"job_id": job_id, "sheet_name": "概览", "header_row": 99},
+    )
+    assert bad_row.status_code == 400
+
+    # 未标记 has_sub_blocks 时 split-values 不返回块信息
+    config = {
+        "sheet_name": "概览",
+        "header_row": 2,
+        "split_column_idx": 1,
+        "split_column_label": "A - 团队",
+        "mode": "direct",
+    }
+    values = client.post(
+        "/api/split-values", json={"job_id": job_id, "sheet_configs": [config]}
+    )
+    assert values.status_code == 200
+    assert values.get_json()["blocks"] == {}

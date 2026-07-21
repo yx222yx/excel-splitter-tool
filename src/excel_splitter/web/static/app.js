@@ -150,15 +150,18 @@ function renderSheetConfigs(selected) {
     const headerOptions = Array.from({ length: Math.min(15, preview.total_rows) }, (_, rowIndex) => rowIndex + 1).map((row) => `<option value="${row}" ${row === preview.suggested_header_row ? "selected" : ""}>第 ${row} 行</option>`).join("");
     const modeOptions = `<option value="full" selected>不拆分，完整保留</option><option value="reference">作为基准 Sheet</option><option value="linked">按关联键匹配</option><option value="direct">直接按本 Sheet 字段拆分</option>`;
     const table = renderPreviewRows(preview.rows, preview.start_row);
-    return `<article class="sheet-config" data-sheet="${escapeHtml(name)}" data-index="${index}"><h2>${escapeHtml(name)}</h2><div class="config-controls"><label>处理方式<select class="sheet-mode">${modeOptions}</select></label><label>表头行<select class="header-row">${headerOptions}</select></label><label class="split-column-control">拆分字段<select class="split-column"></select></label><label class="key-column-control">关联键字段<select class="key-column"></select></label></div><div class="block-configs"></div><div class="preview-meta">已加载 <span class="loaded-rows">${preview.end_row}</span> / ${preview.total_rows} 行</div><div class="preview-wrap"><table class="preview-table"><tbody>${table}</tbody></table></div></article>`;
+    return `<article class="sheet-config" data-sheet="${escapeHtml(name)}" data-index="${index}"><h2>${escapeHtml(name)}</h2><div class="config-controls"><label>处理方式<select class="sheet-mode">${modeOptions}</select></label><label>表头行<select class="header-row">${headerOptions}</select></label><label class="split-column-control">拆分字段<select class="split-column"></select></label><label class="key-column-control">关联键字段<select class="key-column"></select></label></div><label class="sub-blocks-toggle"><input type="checkbox" class="has-sub-blocks"><span>该 sheet 表头下方还有额外表区（小表格）</span></label><div class="block-configs"></div><div class="preview-meta">已加载 <span class="loaded-rows">${preview.end_row}</span> / ${preview.total_rows} 行</div><div class="preview-wrap"><table class="preview-table"><tbody>${table}</tbody></table></div></article>`;
   }).join("");
   document.querySelectorAll(".sheet-config").forEach((block) => {
-    block.querySelector(".header-row").addEventListener("change", () => { updateColumns(block); loadBlockInfo(); });
-    block.querySelector(".sheet-mode").addEventListener("change", () => { updateModeControls(block); loadBlockInfo(); });
+    block.querySelector(".header-row").addEventListener("change", () => {
+      updateColumns(block);
+      if (block.querySelector(".has-sub-blocks").checked) fetchSheetBlocks(block);
+    });
+    block.querySelector(".sheet-mode").addEventListener("change", () => updateModeControls(block));
+    block.querySelector(".has-sub-blocks").addEventListener("change", () => onSubBlocksToggle(block));
     block.querySelector(".preview-wrap").addEventListener("scroll", () => maybeLoadMorePreview(block));
     updateColumns(block);
   });
-  loadBlockInfo();
 }
 
 function renderPreviewRows(rows, startRow) {
@@ -221,6 +224,14 @@ function updateModeControls(block) {
   block.querySelector(".key-column-control").hidden = !usesKeyColumn;
   splitColumn.disabled = !usesSplitColumn;
   keyColumn.disabled = !usesKeyColumn;
+  const subBlocksToggle = block.querySelector(".sub-blocks-toggle");
+  if (subBlocksToggle) {
+    subBlocksToggle.hidden = mode === "full";
+    if (mode === "full" && block.querySelector(".has-sub-blocks").checked) {
+      block.querySelector(".has-sub-blocks").checked = false;
+      onSubBlocksToggle(block);
+    }
+  }
 }
 
 function columnLetter(index) {
@@ -245,25 +256,40 @@ function sheetConfigs() {
       key_column_idx: usesKeyColumn ? Number(keyColumn.value) : null,
       key_column_label: usesKeyColumn ? keyColumn.selectedOptions[0]?.dataset.label || "" : "",
       block_strategies: [...block.querySelectorAll(".block-strategy")].map((select) => select.value),
+      has_sub_blocks: block.querySelector(".has-sub-blocks").checked,
     };
   });
 }
 
 /* ===== 多表区（block）配置 ===== */
-async function loadBlockInfo() {
+async function onSubBlocksToggle(block) {
+  if (!block.querySelector(".has-sub-blocks").checked) {
+    if (state.blocks) delete state.blocks[block.dataset.sheet];
+    renderBlockConfigs();
+    return;
+  }
+  await fetchSheetBlocks(block);
+}
+
+async function fetchSheetBlocks(block) {
   try {
-    const configs = sheetConfigs();
-    validateSheetConfigs(configs);
-    const payload = await api("/api/split-values", {
+    const payload = await api("/api/sheet-blocks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ job_id: state.jobId, sheet_configs: configs }),
-    }, false);
-    state.blockStrategies = collectBlockStrategies();
-    state.blocks = payload.blocks || {};
+      body: JSON.stringify({
+        job_id: state.jobId,
+        sheet_name: block.dataset.sheet,
+        header_row: Number(block.querySelector(".header-row").value),
+      }),
+    });
+    state.blocks = state.blocks || {};
+    state.blocks[block.dataset.sheet] = payload.blocks || [];
     renderBlockConfigs();
+    if (!payload.blocks || payload.blocks.length < 2) {
+      block.querySelector(".block-configs").innerHTML = `<div class="muted">该 sheet 未检测到额外表区</div>`;
+    }
   } catch (error) {
-    // 配置暂不完整（如基准 Sheet 未选好）时静默忽略，沿用已有表区信息
+    showAlert(error.message);
   }
 }
 
@@ -277,6 +303,7 @@ function collectBlockStrategies() {
 }
 
 function renderBlockConfigs() {
+  state.blockStrategies = collectBlockStrategies();
   document.querySelectorAll(".sheet-config").forEach((block) => {
     const container = block.querySelector(".block-configs");
     const blocks = (state.blocks || {})[block.dataset.sheet] || [];

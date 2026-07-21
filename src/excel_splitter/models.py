@@ -24,6 +24,8 @@ class SheetConfig:
     key_column_label: str = ""
     # 表区策略：按块序号（块 2 起）对应 follow/keep/drop，缺省一律 follow
     block_strategies: tuple[str, ...] = ()
+    # 用户手动标记该 sheet 表头下方有额外表区，标记后才做表区检测
+    has_sub_blocks: bool = False
 
     def validate(self) -> None:
         if not self.sheet_name.strip():

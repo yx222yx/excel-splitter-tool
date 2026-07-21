@@ -56,6 +56,7 @@ def build_split_plan(
         blocks = {
             config.sheet_name: _detect_blocks(workbook[config.sheet_name], config.header_row)
             for config in configs
+            if config.has_sub_blocks and config.mode != "full"
         }
 
         reference = next(
