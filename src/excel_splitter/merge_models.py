@@ -29,6 +29,7 @@ class MergeJob:
     sheet_configs: tuple[MergeSheetConfig, ...]
     include_source_column: bool = False
     source_column_name: str = "来源文件"
+    skip_duplicate_sheets: bool = True
     overwrite: bool = False
 
     @property
@@ -69,6 +70,7 @@ class MergeSheetResult:
     source_rows: dict[str, int] = field(default_factory=dict)
     missing_fields: dict[str, list[str]] = field(default_factory=dict)
     extra_fields: dict[str, list[str]] = field(default_factory=dict)
+    skipped_duplicates: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
 

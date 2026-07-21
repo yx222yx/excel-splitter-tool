@@ -213,6 +213,7 @@ def execute_merge():
         sheet_configs=configs,
         include_source_column=bool(payload.get("include_source_column", False)),
         source_column_name=source_column_name.strip(),
+        skip_duplicate_sheets=bool(payload.get("skip_duplicate_sheets", True)),
         overwrite=bool(payload.get("overwrite", False)),
     )
     merge_job.validate()
@@ -399,6 +400,7 @@ class _ProgressSheetResult:
     missing_fields: dict[str, list[str]]
     extra_fields: dict[str, list[str]]
     warnings: list[str]
+    skipped_duplicates: dict[str, str] = field(default_factory=dict)
     output_files: list = field(default_factory=list)
 
 
@@ -421,6 +423,7 @@ def _to_progress_summary(summary: MergeSummary) -> _ProgressSummary:
                 missing_fields={k: list(v) for k, v in result.missing_fields.items()},
                 extra_fields={k: list(v) for k, v in result.extra_fields.items()},
                 warnings=list(result.warnings),
+                skipped_duplicates=dict(result.skipped_duplicates),
             )
             for result in summary.results
         ],

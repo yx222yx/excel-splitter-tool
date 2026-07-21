@@ -634,6 +634,7 @@ byId("merge-execute").addEventListener("click", async () => {
     job_id: mergeState.jobId,
     sheet_configs: mergeSheetConfigs(),
     include_source_column: byId("merge-include-source").checked,
+    skip_duplicate_sheets: byId("merge-skip-duplicates").checked,
     overwrite: byId("merge-overwrite").checked,
     output_password: outputPassword,
     background: true,
@@ -694,7 +695,8 @@ function renderMergeResults(payload) {
   byId("merge-error-count").textContent = payload.errors.length;
   const sheetStats = payload.results.map((result) => {
     const sources = Object.entries(result.source_rows).map(([file, rows]) => `${escapeHtml(file)} ${rows} 行`).join("，");
-    return `<div class="result-stats"><span>${escapeHtml(result.sheet_name)}：合并 ${result.merged_rows} 行（${sources}）</span></div>`;
+    const skipped = Object.entries(result.skipped_duplicates || {}).map(([file, original]) => `文件 ${escapeHtml(file)}（与 ${escapeHtml(original)} 完全相同，已跳过）`).join("，");
+    return `<div class="result-stats"><span>${escapeHtml(result.sheet_name)}：合并 ${result.merged_rows} 行（${sources}）${skipped ? `；跳过重复：${skipped}` : ""}</span></div>`;
   }).join("");
   byId("merge-result-list").innerHTML = `${sheetStats}<div class="result-item"><strong>合并结果</strong><span class="result-path">${escapeHtml(payload.output_file)}</span><span class="merge-result-actions"><button class="btn-action" data-action="open-file" data-path="${escapeHtml(payload.output_file)}">打开文件</button><button class="btn-action" data-action="open-folder" data-path="${escapeHtml(payload.output_file)}">打开所在文件夹</button></span></div>`;
   const messages = [...payload.warnings, ...payload.errors];

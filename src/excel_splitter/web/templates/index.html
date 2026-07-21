@@ -179,6 +179,7 @@
           <label>输出目录<span class="input-action"><input id="merge-output-dir" type="text" placeholder="默认为第一个文件所在目录"><button id="merge-browse-output-dir" type="button" class="secondary">选择文件夹</button></span></label>
           <label>输出文件名<input id="merge-output-filename" type="text" placeholder="默认为「第一个文件名_合并结果.xlsx」"></label>
           <label class="toggle"><input id="merge-include-source" type="checkbox"><span>添加「来源文件」列</span></label>
+          <label class="toggle"><input id="merge-skip-duplicates" type="checkbox" checked><span>跳过内容完全相同的 sheet（勾选后，多个文件中一模一样的 sheet 只保留一份）</span></label>
           <label class="toggle"><input id="merge-output-encrypt" type="checkbox"><span>加密输出文件</span></label>
           <label id="merge-output-password-group" hidden>加密密码<span class="input-action"><input id="merge-output-password" type="password" placeholder="请输入加密密码"></span></label>
           <label class="toggle"><input id="merge-overwrite" type="checkbox"><span>覆盖同名文件</span></label>

@@ -370,3 +370,48 @@ def test_background_execute_reports_progress(tmp_path):
     assert result["results"][0]["sheet_name"] == "工时"
     assert result["results"][0]["source_rows"] == {"部门A.xlsx": 1, "部门B.xlsx": 1}
     assert Path(result["output_file"]).is_file()
+
+
+def test_execute_skip_duplicate_sheets_param(tmp_path):
+    client = _app(tmp_path).test_client()
+    identical = {"汇总": [["指标"], [100], [200]]}
+    loaded = _upload(
+        client,
+        [
+            (_xlsx_bytes(identical), "部门A.xlsx"),
+            (_xlsx_bytes(identical), "部门B.xlsx"),
+        ],
+    )
+    job_id = loaded.get_json()["job_id"]
+    configs = [{"sheet_name": "汇总", "header_row": 1}]
+
+    default_run = client.post(
+        "/api/merge/execute",
+        json={
+            "job_id": job_id,
+            "sheet_configs": configs,
+            "output_dir": str(tmp_path / "默认去重"),
+            "output_filename": "默认去重.xlsx",
+            "background": False,
+        },
+    )
+    assert default_run.status_code == 200
+    result = default_run.get_json()["results"][0]
+    assert result["merged_rows"] == 2
+    assert result["skipped_duplicates"] == {"部门B.xlsx": "部门A.xlsx"}
+
+    disabled_run = client.post(
+        "/api/merge/execute",
+        json={
+            "job_id": job_id,
+            "sheet_configs": configs,
+            "output_dir": str(tmp_path / "关闭去重"),
+            "output_filename": "关闭去重.xlsx",
+            "skip_duplicate_sheets": False,
+            "background": False,
+        },
+    )
+    assert disabled_run.status_code == 200
+    result = disabled_run.get_json()["results"][0]
+    assert result["merged_rows"] == 4
+    assert result["skipped_duplicates"] == {}

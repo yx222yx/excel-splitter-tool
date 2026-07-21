@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from copy import copy
 from pathlib import Path
 from typing import Callable
@@ -49,6 +50,13 @@ class MergeEngine:
         source_rows: dict[str, dict[str, int]] = {
             config.sheet_name: {} for config in job.sheet_configs
         }
+        # 每个 sheet 已见过的内容指纹（指纹 -> 首个文件名），用于跳过完全重复的 sheet
+        fingerprints: dict[str, dict[str, str]] = {
+            config.sheet_name: {} for config in job.sheet_configs
+        }
+        skipped_duplicates: dict[str, dict[str, str]] = {
+            config.sheet_name: {} for config in job.sheet_configs
+        }
         errors: list[str] = []
         all_warnings = list(plan.warnings)
 
@@ -81,6 +89,18 @@ class MergeEngine:
                     if input_file.name not in sheet_plan.headers_by_file:
                         continue
                     sheet = workbook[config.sheet_name]
+                    if job.skip_duplicate_sheets:
+                        fingerprint = _sheet_fingerprint(sheet)
+                        seen = fingerprints[config.sheet_name]
+                        if fingerprint in seen:
+                            original = seen[fingerprint]
+                            skipped_duplicates[config.sheet_name][input_file.name] = original
+                            all_warnings.append(
+                                f"文件 {input_file.name} 的 sheet「{config.sheet_name}」"
+                                f"与文件 {original} 内容完全相同，已跳过"
+                            )
+                            continue
+                        seen[fingerprint] = input_file.name
                     try:
                         added, unit_warnings = self._merge_file_sheet(
                             output_sheets[config.sheet_name],
@@ -121,6 +141,7 @@ class MergeEngine:
                     source_rows=sheet_source,
                     missing_fields=dict(sheet_plan.missing_fields),
                     extra_fields=dict(sheet_plan.extra_fields),
+                    skipped_duplicates=dict(skipped_duplicates[config.sheet_name]),
                     warnings=sheet_warnings,
                 )
             )
@@ -212,6 +233,26 @@ class MergeEngine:
                     if added % 2000 == 0:
                         report_rows(added, total_rows)
         return added, warnings
+
+
+def _sheet_fingerprint(sheet) -> str:
+    """计算一个 sheet 的内容指纹：全部行（标题区+表头行+数据行）的原始值哈希。
+
+    基于读取到的原始行值，列顺序不同不算重复（保守语义，仍按表头名对齐合并）。
+    """
+    digest = hashlib.sha256()
+    for row in sheet.iter_rows(values_only=True):
+        digest.update(b"\x1e")  # 行分隔
+        for value in row:
+            digest.update(_fingerprint_token(value))
+    return digest.hexdigest()
+
+
+def _fingerprint_token(value) -> bytes:
+    if value is None:
+        return b"\x00"
+    # 带上类型名，避免数字 1 与字符串 "1" 被当成相同内容
+    return b"\x01" + f"{type(value).__name__}:{value}".encode("utf-8", "replace") + b"\x1f"
 
 
 def _map_row(row, mapping, column_count, job: MergeJob, input_file: Path):

@@ -319,3 +319,108 @@ def test_merge_copies_header_style_and_column_width_from_first_file(tmp_path):
     assert merged["A1"].font.bold
     assert merged.column_dimensions["A"].width == 21
     workbook.close()
+
+
+def _merge_job(files, output, sheet_names=("汇总",), **overrides):
+    kwargs = {
+        "input_files": tuple(files),
+        "output_file": output,
+        "sheet_configs": tuple(MergeSheetConfig(name) for name in sheet_names),
+    }
+    kwargs.update(overrides)
+    return MergeJob(**kwargs)
+
+
+def test_merge_skips_identical_sheet_by_default(tmp_path):
+    identical = {"汇总": [["指标", "说明"], [100, "相同内容"], [200, "完全一致"]]}
+    file_a = _make_workbook(tmp_path / "部门A.xlsx", identical)
+    file_b = _make_workbook(tmp_path / "部门B.xlsx", identical)
+    output = tmp_path / "合并结果.xlsx"
+
+    summary = MergeEngine().execute(_merge_job([file_a, file_b], output))
+
+    result = summary.results[0]
+    assert result.merged_rows == 2
+    assert result.source_rows == {"部门A.xlsx": 2}
+    assert result.skipped_duplicates == {"部门B.xlsx": "部门A.xlsx"}
+    assert any("部门B.xlsx" in w and "完全相同" in w for w in summary.warnings)
+    assert _read_rows(output, "汇总") == [
+        ["指标", "说明"],
+        [100, "相同内容"],
+        [200, "完全一致"],
+    ]
+
+
+def test_merge_writes_duplicates_when_skip_disabled(tmp_path):
+    identical = {"汇总": [["指标"], [100], [200]]}
+    file_a = _make_workbook(tmp_path / "部门A.xlsx", identical)
+    file_b = _make_workbook(tmp_path / "部门B.xlsx", identical)
+    output = tmp_path / "合并结果.xlsx"
+
+    summary = MergeEngine().execute(
+        _merge_job([file_a, file_b], output, skip_duplicate_sheets=False)
+    )
+
+    result = summary.results[0]
+    assert result.merged_rows == 4
+    assert result.skipped_duplicates == {}
+    assert _read_rows(output, "汇总") == [["指标"], [100], [200], [100], [200]]
+
+
+def test_merge_skips_only_the_identical_sheet(tmp_path):
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {
+            "汇总": [["指标"], [100]],
+            "工时": [["姓名"], ["张三"]],
+        },
+    )
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {
+            "汇总": [["指标"], [100]],
+            "工时": [["姓名"], ["王五"]],
+        },
+    )
+    output = tmp_path / "合并结果.xlsx"
+
+    summary = MergeEngine().execute(
+        _merge_job([file_a, file_b], output, sheet_names=("汇总", "工时"))
+    )
+
+    results = {r.sheet_name: r for r in summary.results}
+    assert results["汇总"].skipped_duplicates == {"部门B.xlsx": "部门A.xlsx"}
+    assert results["汇总"].merged_rows == 1
+    assert results["工时"].skipped_duplicates == {}
+    assert results["工时"].merged_rows == 2
+
+
+def test_merge_keeps_first_of_three_files_when_two_identical(tmp_path):
+    file_a = _make_workbook(tmp_path / "部门A.xlsx", {"汇总": [["指标"], [100]]})
+    file_b = _make_workbook(tmp_path / "部门B.xlsx", {"汇总": [["指标"], [200]]})
+    file_c = _make_workbook(tmp_path / "部门C.xlsx", {"汇总": [["指标"], [200]]})
+    output = tmp_path / "合并结果.xlsx"
+
+    summary = MergeEngine().execute(_merge_job([file_a, file_b, file_c], output))
+
+    result = summary.results[0]
+    assert result.merged_rows == 2
+    assert result.source_rows == {"部门A.xlsx": 1, "部门B.xlsx": 1}
+    assert result.skipped_duplicates == {"部门C.xlsx": "部门B.xlsx"}
+    assert _read_rows(output, "汇总") == [["指标"], [100], [200]]
+
+
+def test_merge_does_not_treat_different_column_order_as_duplicate(tmp_path):
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx", {"工时": [["姓名", "工时"], ["张三", 8]]}
+    )
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx", {"工时": [["工时", "姓名"], [8, "张三"]]}
+    )
+    output = tmp_path / "合并结果.xlsx"
+
+    summary = MergeEngine().execute(_merge_job([file_a, file_b], output, sheet_names=("工时",)))
+
+    result = summary.results[0]
+    assert result.skipped_duplicates == {}
+    assert result.merged_rows == 2
