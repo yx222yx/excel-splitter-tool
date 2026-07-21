@@ -158,13 +158,13 @@ select, input[type="text"] { min-height: 40px; width: 100%; border: 1px solid #a
 .merge-failures:empty { display: none; }
 .merge-failure-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 10px 12px; border: 1px solid #e1e5e8; border-radius: 6px; }
 
-.merge-sheet-configs { display: grid; gap: 8px; }
+.merge-sheet-configs { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; max-width: 100%; }
 .merge-sheet-config { display: flex; align-items: center; gap: 16px; padding: 10px 12px; background: #fff; border: 1px solid #d4dbe0; border-radius: 6px; }
 .merge-sheet-config label { display: flex; align-items: center; gap: 8px; color: #4e5d68; font-size: 13px; }
 .merge-sheet-config input { width: 90px; min-height: 36px; border: 1px solid #aeb9c1; border-radius: 4px; padding: 6px 8px; }
 
-.merge-plan-results { margin-top: 16px; display: grid; gap: 12px; }
-.merge-plan-sheet { padding: 14px 16px; background: #fff; border: 1px solid #d4dbe0; border-radius: 6px; }
+.merge-plan-results { margin-top: 16px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; max-width: 100%; }
+.merge-plan-sheet { min-width: 0; max-width: 100%; padding: 14px 16px; background: #fff; border: 1px solid #d4dbe0; border-radius: 6px; }
 .merge-plan-sheet h2 { margin: 0 0 8px; font-size: 15px; }
 .merge-plan-sheet ul { margin: 0; padding-left: 18px; color: #7a5416; font-size: 13px; }
 
@@ -176,7 +176,7 @@ select, input[type="text"] { min-height: 40px; width: 100%; border: 1px solid #a
 }
 
 /* ===== 合并字段检查卡片与字段矩阵 ===== */
-.merge-sheet-card { padding: 14px 16px; background: #fff; border: 1px solid #d4dbe0; border-radius: 6px; }
+.merge-sheet-card { min-width: 0; max-width: 100%; padding: 14px 16px; background: #fff; border: 1px solid #d4dbe0; border-radius: 6px; }
 .merge-card-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .merge-card-header strong { font-size: 15px; }
 .merge-card-source, .merge-card-choice { font-size: 12px; }
@@ -186,7 +186,7 @@ select, input[type="text"] { min-height: 40px; width: 100%; border: 1px solid #a
 .merge-card-preview { margin-top: 10px; }
 .merge-header-selected td, .merge-header-selected th.row-number { background: #e2f2ea; font-weight: 600; }
 
-.merge-matrix-wrap { overflow: auto; margin: 8px 0 10px; }
+.merge-matrix-wrap { overflow: auto; max-width: 100%; margin: 8px 0 10px; }
 .merge-field-matrix { border-collapse: collapse; font-size: 13px; white-space: nowrap; }
 .merge-field-matrix th, .merge-field-matrix td { border: 1px solid #d9dfe3; padding: 6px 10px; text-align: center; }
 .merge-field-matrix th { background: #edf5f1; color: #315448; }
