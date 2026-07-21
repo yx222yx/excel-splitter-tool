@@ -12,7 +12,7 @@ from ..encryption import decrypt_file, encrypt_file, is_encrypted
 from ..excel_io import load_workbook_with_warnings
 from ..merge_engine import MergeEngine
 from ..merge_models import MergeJob, MergeSheetConfig, MergeSummary
-from ..merge_planning import MergePlan, build_merge_plan
+from ..merge_planning import MergePlan, build_merge_plan, display_headers
 from .routes import _jobs, _json_payload, _json_value, _required_text
 
 
@@ -418,7 +418,8 @@ def _serialize_plan(plan: MergePlan) -> dict[str, Any]:
             {
                 "sheet_name": sheet.sheet_name,
                 "header_row": sheet.header_row,
-                "union_headers": sheet.union_headers,
+                # 展示用表头：同名字段带序号后缀（如 2026Q1、2026Q1 (2)）
+                "union_headers": display_headers(sheet.union_headers),
                 "base_file": sheet.base_file,
                 "missing_files": sheet.missing_files,
                 "missing_fields": sheet.missing_fields,

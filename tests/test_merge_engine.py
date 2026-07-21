@@ -925,3 +925,181 @@ def test_merge_extends_chart_data_ranges(tmp_path):
     # identical sheet 未被追加，引用自身的图表不动（openpyxl 会把单单元格区域折叠成单格引用）
     assert summary_charts[1].series[0].val.numRef.f == "'汇总'!$A$2"
     workbook.close()
+
+
+def test_duplicate_header_names_map_by_occurrence(tmp_path):
+    headers = ["姓名", "2026Q1", "2026Q2", "2026Q1", "2026Q2"]
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {"汇总": [headers, ["张三", 1, 2, 3, 4]]},
+    )
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {"汇总": [headers, ["李四", 5, 6, "=B2+C2", "=D2*2"]]},
+    )
+    output = tmp_path / "合并结果.xlsx"
+    job = MergeJob(
+        input_files=(file_a, file_b),
+        output_file=output,
+        sheet_configs=(MergeSheetConfig("汇总"),),
+    )
+
+    summary = MergeEngine().execute(job)
+
+    assert summary.errors == []
+    rows = _read_rows(output, "汇总")
+    assert rows == [
+        headers,
+        ["张三", 1, 2, 3, 4],
+        ["李四", 5, 6, "=B3+C3", "=D3*2"],
+    ]
+    # 第二组同名字段的数据/公式落在第二组的列，不串列
+    workbook = load_workbook(output)
+    sheet = workbook["汇总"]
+    assert sheet["D3"].value == "=B3+C3"
+    assert sheet["E3"].value == "=D3*2"
+    workbook.close()
+
+
+def test_duplicate_header_union_preserves_occurrences(tmp_path):
+    from excel_splitter.merge_planning import build_merge_plan
+
+    headers = ["姓名", "2026Q1", "2026Q1"]
+    file_a = _make_workbook(tmp_path / "部门A.xlsx", {"汇总": [headers, ["张三", 1, 2]]})
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {"汇总": [["姓名", "2026Q1", "2026Q1", "2026Q1"], ["李四", 3, 4, 5]]},
+    )
+
+    plan = build_merge_plan((file_a, file_b), (MergeSheetConfig("汇总"),))
+    sheet = plan.sheets[0]
+    # 并集保留重复名字：基准两组 + B 的第三组
+    assert sheet.union_headers == ["姓名", "2026Q1", "2026Q1", "2026Q1"]
+    assert sheet.extra_fields == {"部门B.xlsx": ["2026Q1 (3)"]}
+
+    output = tmp_path / "合并结果.xlsx"
+    MergeEngine().execute(
+        MergeJob(
+            input_files=(file_a, file_b),
+            output_file=output,
+            sheet_configs=(MergeSheetConfig("汇总"),),
+        )
+    )
+    assert _read_rows(output, "汇总") == [
+        ["姓名", "2026Q1", "2026Q1", "2026Q1"],
+        ["张三", 1, 2, None],
+        ["李四", 3, 4, 5],
+    ]
+
+
+def test_ghost_rows_trimmed_before_appending(tmp_path):
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {"工时": [["姓名", "工时"], ["张三", 8], ["李四", 7]]},
+    )
+    # 拆分产物的典型残留：数据后的全空但带样式的幽灵行
+    workbook = load_workbook(file_a)
+    sheet = workbook["工时"]
+    from openpyxl.styles import PatternFill
+
+    for row in range(4, 17):
+        for col in (1, 2):
+            sheet.cell(row=row, column=col).fill = PatternFill("solid", fgColor="DDDDDD")
+    workbook.save(file_a)
+    workbook.close()
+    assert load_workbook(file_a)["工时"].max_row == 16
+
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {"工时": [["姓名", "工时"], ["王五", 6], ["赵六", 5]]},
+    )
+    output = tmp_path / "合并结果.xlsx"
+    MergeEngine().execute(
+        MergeJob(
+            input_files=(file_a, file_b),
+            output_file=output,
+            sheet_configs=(MergeSheetConfig("工时"),),
+        )
+    )
+
+    rows = _read_rows(output, "工时")
+    assert rows == [
+        ["姓名", "工时"],
+        ["张三", 8],
+        ["李四", 7],
+        ["王五", 6],
+        ["赵六", 5],
+    ]
+    workbook = load_workbook(output)
+    assert workbook["工时"].max_row == 5
+    workbook.close()
+
+
+def test_chart_range_extends_when_covering_data_area(tmp_path):
+    from openpyxl.chart import BarChart, Reference
+
+    # 模板真实数据只有第 3 行一行，图表却保留原表的大区间 $3:$15
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {"数据": [["标题"], ["类别", "值"], ["甲", 1]]},
+    )
+    workbook = load_workbook(file_a)
+    data_ws = workbook["数据"]
+    chart = BarChart()
+    chart.add_data(Reference(data_ws, min_col=2, min_row=3, max_row=15), titles_from_data=False)
+    chart.set_categories(Reference(data_ws, min_col=1, min_row=3, max_row=15))
+    data_ws.add_chart(chart, "E2")
+    workbook.save(file_a)
+    workbook.close()
+
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {"数据": [["标题"], ["类别", "值"], ["乙", 2], ["丙", 3], ["丁", 4]]},
+    )
+    output = tmp_path / "合并结果.xlsx"
+    MergeEngine().execute(
+        MergeJob(
+            input_files=(file_a, file_b),
+            output_file=output,
+            sheet_configs=(MergeSheetConfig("数据", header_row=2),),
+        )
+    )
+
+    workbook = load_workbook(output)
+    series = workbook["数据"]._charts[0].series[0]
+    # 数据末行 3 → 6（追加 3 行），大区间末行延伸为真实末行
+    assert series.val.numRef.f == "'数据'!$B$3:$B$6"
+    assert series.cat.numRef.f == "'数据'!$A$3:$A$6"
+    workbook.close()
+
+
+def test_failed_formula_translation_keeps_original_and_warns(tmp_path, monkeypatch):
+    import excel_splitter.merge_engine as engine_module
+
+    def broken_translator(formula, origin=None):
+        raise ValueError("模拟平移失败")
+
+    monkeypatch.setattr(engine_module, "Translator", broken_translator)
+
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {"工时": [["姓名", "工时", "公式"], ["张三", 8, "=B2*2"]]},
+    )
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {"工时": [["姓名", "工时", "公式"], ["李四", 7, "=B2*2"]]},
+    )
+    output = tmp_path / "合并结果.xlsx"
+    summary = MergeEngine().execute(
+        MergeJob(
+            input_files=(file_a, file_b),
+            output_file=output,
+            sheet_configs=(MergeSheetConfig("工时"),),
+        )
+    )
+
+    # 兜底：保留原公式 + 汇总警告
+    workbook = load_workbook(output)
+    assert workbook["工时"]["C3"].value == "=B2*2"
+    workbook.close()
+    assert any("1 个公式平移失败" in w for w in summary.results[0].warnings)

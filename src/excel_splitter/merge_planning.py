@@ -90,38 +90,46 @@ def build_merge_plan(
         base_file = next(
             (path.name for path in files if path.name in file_headers), None
         )
+        # 字段身份 = (规范化名字, 同名字段中的出现序号)：第 k 个名为 X 的列
+        # 与基准文件第 k 个名为 X 的列对齐，同名表头（如两组 2026Q1-Q4）不塌缩
         union_headers: list[str] = []
+        union_ids: set[tuple[str, int]] = set()
         if base_file is not None:
-            union_headers.extend(
-                header for header in file_headers[base_file] if header is not None
-            )
+            for name, _occ in _identities(file_headers[base_file]):
+                union_ids.add((name, _occ))
+                union_headers.append(name)
         for path in files:
             headers = file_headers.get(path.name)
             if headers is None or path.name == base_file:
                 continue
-            for header in headers:
-                if header is not None and header not in union_headers:
-                    union_headers.append(header)
+            for identity in _identities(headers):
+                if identity not in union_ids:
+                    union_ids.add(identity)
+                    union_headers.append(identity[0])
 
         missing_fields: dict[str, list[str]] = {}
         extra_fields: dict[str, list[str]] = {}
-        base_fields = (
-            {header for header in file_headers[base_file] if header is not None}
+        base_ids = (
+            set(_identities(file_headers[base_file]))
             if base_file is not None
             else set()
         )
         for file_name, headers in file_headers.items():
-            present = {header for header in headers if header is not None}
-            missing = [header for header in union_headers if header not in present]
+            present = set(_identities(headers))
+            missing = [
+                _display_name(name, occ)
+                for name, occ in _identities(union_headers)
+                if (name, occ) not in present
+            ]
             extra = [
-                header
-                for header in headers
-                if header is not None and header not in base_fields
+                _display_name(name, occ)
+                for name, occ in _identities(headers)
+                if (name, occ) not in base_ids
             ]
             if missing:
                 missing_fields[file_name] = missing
             if file_name != base_file and extra:
-                extra_fields[file_name] = list(dict.fromkeys(extra))
+                extra_fields[file_name] = extra
 
         plans.append(
             MergeSheetPlan(
@@ -143,6 +151,29 @@ def _normalize_header(value) -> str | None:
         return None
     normalized = str(value).strip()
     return normalized or None
+
+
+def _identities(headers: list[str | None]) -> list[tuple[str, int]]:
+    """把表头列表转成 (名字, 同名字段中的出现序号) 序列（序号从 0 开始）。"""
+    counts: dict[str, int] = {}
+    identities: list[tuple[str, int]] = []
+    for header in headers:
+        if header is None:
+            continue
+        occurrence = counts.get(header, 0)
+        counts[header] = occurrence + 1
+        identities.append((header, occurrence))
+    return identities
+
+
+def _display_name(name: str, occurrence: int) -> str:
+    """展示名：第二次及以后出现的同名字段加序号后缀，如「2026Q1 (2)」。"""
+    return name if occurrence == 0 else f"{name} ({occurrence + 1})"
+
+
+def display_headers(headers: list[str]) -> list[str]:
+    """并集表头的展示形式，供接口序列化与前端展示使用。"""
+    return [_display_name(name, occ) for name, occ in _identities(headers)]
 
 
 def _open_readable_workbook(path: Path, passwords: dict | None):
