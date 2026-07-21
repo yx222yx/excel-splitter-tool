@@ -524,3 +524,58 @@ def test_merge_preserves_title_merge_freeze_and_row_height(tmp_path):
     assert sheet.freeze_panes == "A3"
     assert sheet["A4"].value == "李四"
     workbook.close()
+
+
+def test_merge_preserves_title_rows_when_header_row_is_three(tmp_path):
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {
+            "工时": [
+                ["2026 年 7 月工时汇总", None, None],
+                ["编制：人事部", None, "统计区间：7.1-7.31"],
+                ["姓名", "项目", "工时"],
+                ["张三", "项目甲", 8],
+            ]
+        },
+    )
+    workbook = load_workbook(file_a)
+    sheet = workbook["工时"]
+    sheet.merge_cells("A1:C1")
+    sheet.merge_cells("A2:B2")
+    sheet.row_dimensions[1].height = 30
+    workbook.save(file_a)
+    workbook.close()
+
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {
+            "工时": [
+                ["部门B 自己的标题", None, None],
+                ["部门B 的副标题", None, None],
+                ["姓名", "项目", "工时"],
+                ["李四", "项目乙", 7],
+            ]
+        },
+    )
+    output = tmp_path / "合并结果.xlsx"
+    job = MergeJob(
+        input_files=(file_a, file_b),
+        output_file=output,
+        sheet_configs=(MergeSheetConfig("工时", header_row=3),),
+    )
+    summary = MergeEngine().execute(job)
+
+    assert summary.errors == []
+    rows = _read_rows(output, "工时")
+    assert rows == [
+        ["2026 年 7 月工时汇总", None, None],
+        ["编制：人事部", None, "统计区间：7.1-7.31"],
+        ["姓名", "项目", "工时"],
+        ["张三", "项目甲", 8],
+        ["李四", "项目乙", 7],
+    ]
+    workbook = load_workbook(output)
+    sheet = workbook["工时"]
+    assert {str(item) for item in sheet.merged_cells.ranges} == {"A1:C1", "A2:B2"}
+    assert sheet.row_dimensions[1].height == 30
+    workbook.close()

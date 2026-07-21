@@ -551,11 +551,17 @@ byId("merge-to-fields").addEventListener("click", () => {
   if (!selected.length) return showAlert("至少选择一个 Sheet");
   mergeState.selectedSheets = selected;
   // 只渲染卡片骨架，预览懒加载（展开时才请求），避免多 sheet 时一次性渲染卡顿
-  byId("merge-sheet-configs").innerHTML = selected.map((name) => `<article class="merge-sheet-card" data-sheet="${escapeHtml(name)}" data-header-row="1"><header class="merge-card-header"><strong>${escapeHtml(name)}</strong><span class="muted merge-card-source">预览取自第一个包含该 Sheet 的文件</span><span class="muted merge-card-choice">表头行：第 1 行</span><button type="button" class="secondary small merge-card-toggle">展开预览</button></header><div class="merge-card-preview" hidden></div></article>`).join("");
+  byId("merge-sheet-configs").innerHTML = selected.map((name) => `<article class="merge-sheet-card" data-sheet="${escapeHtml(name)}" data-header-row="1"><header class="merge-card-header"><strong>${escapeHtml(name)}</strong><span class="muted merge-card-source">预览取自第一个包含该 Sheet 的文件</span><label class="merge-card-header-row">表头行<select class="merge-header-row-select">${mergeHeaderRowOptions(15, 1)}</select></label><button type="button" class="secondary small merge-card-toggle">展开预览</button></header><div class="merge-card-preview" hidden></div></article>`).join("");
   byId("merge-plan-results").innerHTML = "";
   mergeState.maxStep = Math.max(mergeState.maxStep, 3);
   mergeGoStep(3);
 });
+
+function mergeHeaderRowOptions(totalRows, selectedRow) {
+  return Array.from({ length: totalRows }, (_, index) => index + 1)
+    .map((row) => `<option value="${row}" ${row === selectedRow ? "selected" : ""}>第 ${row} 行</option>`)
+    .join("");
+}
 
 function mergeSheetConfigs() {
   return [...document.querySelectorAll(".merge-sheet-card")].map((card) => ({
@@ -566,42 +572,44 @@ function mergeSheetConfigs() {
 
 byId("merge-sheet-configs").addEventListener("click", async (event) => {
   const toggle = event.target.closest(".merge-card-toggle");
-  if (toggle) {
-    const card = toggle.closest(".merge-sheet-card");
-    const previewBox = card.querySelector(".merge-card-preview");
-    if (!previewBox.hidden) {
-      previewBox.hidden = true;
-      toggle.textContent = "展开预览";
-      return;
-    }
-    if (!previewBox.dataset.loaded) {
-      try {
-        const payload = await mergeApi("/api/merge/preview", { job_id: mergeState.jobId, sheet_name: card.dataset.sheet, max_rows: 50 });
-        previewBox.innerHTML = renderMergePreviewTable(payload);
-        previewBox.dataset.loaded = "1";
-        card.querySelector(".merge-card-source").textContent = `预览来源：${payload.source_file}`;
-        markMergeHeaderRow(card);
-      } catch (error) {
-        showAlert(error.message);
-        return;
-      }
-    }
-    previewBox.hidden = false;
-    toggle.textContent = "收起预览";
+  if (!toggle) return;
+  const card = toggle.closest(".merge-sheet-card");
+  const previewBox = card.querySelector(".merge-card-preview");
+  if (!previewBox.hidden) {
+    previewBox.hidden = true;
+    toggle.textContent = "展开预览";
     return;
   }
-  const row = event.target.closest("tr[data-row]");
-  if (row) {
-    const card = row.closest(".merge-sheet-card");
-    card.dataset.headerRow = row.dataset.row;
-    card.querySelector(".merge-card-choice").textContent = `表头行：第 ${row.dataset.row} 行`;
-    markMergeHeaderRow(card);
+  if (!previewBox.dataset.loaded) {
+    try {
+      const payload = await mergeApi("/api/merge/preview", { job_id: mergeState.jobId, sheet_name: card.dataset.sheet, max_rows: 50 });
+      previewBox.innerHTML = renderMergePreviewTable(payload);
+      previewBox.dataset.loaded = "1";
+      card.querySelector(".merge-card-source").textContent = `预览来源：${payload.source_file}`;
+      // 与拆分一致：表头行选项按实际行数生成（最多 15 行）
+      const headerRow = Number(card.dataset.headerRow) || 1;
+      card.querySelector(".merge-header-row-select").innerHTML = mergeHeaderRowOptions(Math.min(15, payload.total_rows), headerRow);
+      markMergeHeaderRow(card);
+    } catch (error) {
+      showAlert(error.message);
+      return;
+    }
   }
+  previewBox.hidden = false;
+  toggle.textContent = "收起预览";
+});
+
+byId("merge-sheet-configs").addEventListener("change", (event) => {
+  const select = event.target.closest(".merge-header-row-select");
+  if (!select) return;
+  const card = select.closest(".merge-sheet-card");
+  card.dataset.headerRow = select.value;
+  markMergeHeaderRow(card);
 });
 
 function renderMergePreviewTable(preview) {
   const body = preview.rows.map((row, index) => `<tr data-row="${index + 1}"><th class="row-number">${index + 1}</th>${row.map((value) => `<td>${escapeHtml(value)}</td>`).join("")}</tr>`).join("");
-  return `<div class="preview-meta">共 ${preview.total_rows} 行，点击某一行将其设为表头行</div><div class="preview-wrap merge-preview-wrap"><table class="preview-table merge-preview-table"><tbody>${body}</tbody></table></div>`;
+  return `<div class="preview-meta">共 ${preview.total_rows} 行，表头行之上的标题内容会保留到合并结果</div><div class="preview-wrap"><table class="preview-table"><tbody>${body}</tbody></table></div>`;
 }
 
 function markMergeHeaderRow(card) {

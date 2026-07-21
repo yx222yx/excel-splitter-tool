@@ -181,9 +181,9 @@ select, input[type="text"] { min-height: 40px; width: 100%; border: 1px solid #a
 .merge-card-header strong { font-size: 15px; }
 .merge-card-source, .merge-card-choice { font-size: 12px; }
 .merge-card-toggle { margin-left: auto; }
+.merge-card-header-row { display: flex; align-items: center; gap: 6px; color: #4e5d68; font-size: 13px; }
+.merge-card-header-row select { min-height: 34px; width: auto; }
 .merge-card-preview { margin-top: 10px; }
-.merge-preview-wrap { height: min(320px, 45vh); min-height: 160px; }
-.merge-preview-table tbody tr { cursor: pointer; }
 .merge-header-selected td, .merge-header-selected th.row-number { background: #e2f2ea; font-weight: 600; }
 
 .merge-matrix-wrap { overflow: auto; margin: 8px 0 10px; }
