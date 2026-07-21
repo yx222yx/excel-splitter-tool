@@ -627,7 +627,7 @@ byId("merge-to-fields").addEventListener("click", () => {
   if (!selected.length) return showAlert("至少选择一个 Sheet");
   mergeState.selectedSheets = selected;
   // 只渲染卡片骨架，预览懒加载（展开时才请求），避免多 sheet 时一次性渲染卡顿
-  byId("merge-sheet-configs").innerHTML = selected.map((name) => `<article class="merge-sheet-card" data-sheet="${escapeHtml(name)}" data-header-row="1"><header class="merge-card-header"><strong>${escapeHtml(name)}</strong><span class="muted merge-card-source">预览取自第一个包含该 Sheet 的文件</span><label class="merge-card-header-row">表头行<select class="merge-header-row-select">${mergeHeaderRowOptions(15, 1)}</select></label><button type="button" class="secondary small merge-card-toggle">展开预览</button></header><label class="merge-card-identical"><input type="checkbox" class="merge-identical-checkbox"><span>各文件中该 Sheet 内容完全一致，只保留一份（不合并）</span></label><div class="muted merge-identical-hint" hidden>已标记为内容完全一致，合并时只保留第一个文件中的该 Sheet</div><div class="merge-card-preview" hidden></div></article>`).join("");
+  byId("merge-sheet-configs").innerHTML = selected.map((name) => `<article class="merge-sheet-card" data-sheet="${escapeHtml(name)}" data-header-row="1"><header class="merge-card-header"><strong>${escapeHtml(name)}</strong><span class="muted merge-card-source">预览取自第一个包含该 Sheet 的文件</span><label class="merge-card-header-row">表头行<select class="merge-header-row-select">${mergeHeaderRowOptions(15, 1)}</select></label><button type="button" class="secondary small merge-card-toggle">展开预览</button></header><label class="merge-card-identical"><input type="checkbox" class="merge-identical-checkbox"><span>各文件中该 Sheet 内容完全一致，只保留一份（不合并）</span></label><div class="muted merge-identical-hint" hidden>已标记为内容完全一致，合并时只保留第一个文件中的该 Sheet</div><label class="sub-blocks-toggle"><input type="checkbox" class="merge-sub-blocks-checkbox"><span>该 sheet 表头下方还有额外表区（小表格）</span></label><div class="muted merge-sub-blocks-info" hidden></div><div class="merge-card-preview" hidden></div></article>`).join("");
   byId("merge-plan-results").innerHTML = "";
   mergeState.maxStep = Math.max(mergeState.maxStep, 3);
   mergeGoStep(3);
@@ -644,6 +644,7 @@ function mergeSheetConfigs() {
     sheet_name: card.dataset.sheet,
     header_row: Number(card.dataset.headerRow) || 1,
     identical: card.querySelector(".merge-identical-checkbox").checked,
+    has_sub_blocks: card.querySelector(".merge-sub-blocks-checkbox").checked,
   }));
 }
 
@@ -689,12 +690,48 @@ byId("merge-sheet-configs").addEventListener("change", (event) => {
     }
     return;
   }
+  const subBlocksBox = event.target.closest(".merge-sub-blocks-checkbox");
+  if (subBlocksBox) {
+    const card = subBlocksBox.closest(".merge-sheet-card");
+    const info = card.querySelector(".merge-sub-blocks-info");
+    if (!subBlocksBox.checked) {
+      info.hidden = true;
+      info.textContent = "";
+      return;
+    }
+    fetchMergeSheetBlocks(card);
+    return;
+  }
   const select = event.target.closest(".merge-header-row-select");
   if (!select) return;
   const card = select.closest(".merge-sheet-card");
   card.dataset.headerRow = select.value;
   markMergeHeaderRow(card);
+  if (card.querySelector(".merge-sub-blocks-checkbox").checked) {
+    fetchMergeSheetBlocks(card);
+  }
 });
+
+async function fetchMergeSheetBlocks(card) {
+  const info = card.querySelector(".merge-sub-blocks-info");
+  try {
+    const payload = await mergeApi("/api/merge/sheet-blocks", {
+      job_id: mergeState.jobId,
+      sheet_name: card.dataset.sheet,
+      header_row: Number(card.dataset.headerRow) || 1,
+    });
+    const first = (payload.files || [])[0];
+    const subBlocks = first ? first.blocks.slice(1) : [];
+    info.hidden = false;
+    info.textContent = subBlocks.length
+      ? `检测到 ${subBlocks.length} 个小表区：` +
+        subBlocks.map((block, index) => `表区 ${index + 1}（表头：${block.header_preview || "（空）"}，共 ${block.data_rows} 行数据）`).join("；") +
+        "。小表将挂起重插到主表之后，内容完全相同的只保留一份"
+      : "该 sheet 未检测到额外表区";
+  } catch (error) {
+    showAlert(error.message);
+  }
+}
 
 function renderMergePreviewTable(preview) {
   const body = preview.rows.map((row, index) => `<tr data-row="${index + 1}"><th class="row-number">${index + 1}</th>${row.map((value) => `<td>${escapeHtml(value)}</td>`).join("")}</tr>`).join("");

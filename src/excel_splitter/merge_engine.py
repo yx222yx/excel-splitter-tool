@@ -12,7 +12,7 @@ from openpyxl.formula.translate import Translator
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 
-from .excel_io import load_workbook_with_warnings
+from .excel_io import detect_blocks, load_workbook_with_warnings
 from .merge_models import MergeJob, MergeSheetConfig, MergeSheetResult, MergeSummary
 from .merge_planning import (
     MergePlan,
@@ -224,6 +224,21 @@ class MergeEngine:
         report: Callable[[float, str], None],
     ) -> None:
         sheet_name = config.sheet_name
+        if config.has_sub_blocks:
+            self._merge_sheet_with_blocks(
+                workbook,
+                config,
+                sheet_plan,
+                job,
+                source_rows,
+                skipped_duplicates,
+                fingerprints,
+                warnings,
+                sheet_warnings,
+                extended_ranges,
+                report,
+            )
+            return
         ws = workbook[sheet_name] if sheet_name in workbook.sheetnames else None
         files = [
             path for path in job.input_files if path.name in sheet_plan.headers_by_file
@@ -282,6 +297,188 @@ class MergeEngine:
                 ws.max_row,
             )
 
+    def _merge_sheet_with_blocks(
+        self,
+        workbook,
+        config: MergeSheetConfig,
+        sheet_plan: MergeSheetPlan,
+        job: MergeJob,
+        source_rows: dict[str, int],
+        skipped_duplicates: dict[str, str],
+        fingerprints: dict[str, str],
+        warnings: list[str],
+        sheet_warnings: list[str],
+        extended_ranges: dict[str, tuple[int, int, int]],
+        report: Callable[[float, str], None],
+    ) -> None:
+        """多表区 sheet 的合并：主表正常合并，小表挂起后按身份重插。
+
+        小表身份按块表头内容识别，顺序以基准文件为准；同一小表在多文件内容
+        完全相同时按块级指纹只保留一份。图表数据范围延伸只针对主表数据区，
+        小表插入完成后再做图表锚点避让。
+        """
+        sheet_name = config.sheet_name
+        ws = workbook[sheet_name] if sheet_name in workbook.sheetnames else None
+        files = [
+            path for path in job.input_files if path.name in sheet_plan.headers_by_file
+        ]
+        if not files:
+            warnings.append(f"所有输入文件都不包含 sheet：{sheet_name}")
+            return
+        total = len(files)
+        blocks_by_file: dict[str, list[tuple[int, int, int]]] = {}
+        base_file: Path | None = None
+        block1_end = 0
+        last_row_before_append: int | None = None
+        for index, input_file in enumerate(files):
+            blocks = _read_file_blocks(input_file, sheet_name, config.header_row)
+            blocks_by_file[input_file.name] = blocks
+            if ws is None or input_file == job.input_files[0]:
+                # 基准就位：模板自带或整体拷贝后，裁剪到主表范围
+                if ws is None:
+                    ws = _copy_sheet_into_template(workbook, input_file, sheet_name)
+                base_file = input_file
+                block1_end = blocks[0][2]
+                if job.skip_duplicate_sheets:
+                    # 指纹在裁剪前计算，与其他文件的整表流式指纹口径一致
+                    fingerprints[_sheet_fingerprint(ws)] = input_file.name
+                if ws.max_row > block1_end:
+                    ws.delete_rows(block1_end + 1, ws.max_row - block1_end)
+                source_rows[input_file.name] = _count_data_rows(ws, config.header_row)
+                self._prepare_union_columns(ws, config, sheet_plan, job, input_file)
+                last_row_before_append = ws.max_row
+                report((index + 1) / total, f"已就位 {input_file.name} / {sheet_name}")
+                continue
+            if job.skip_duplicate_sheets:
+                fingerprint = _read_sheet_fingerprint(input_file, sheet_name)
+                if fingerprint in fingerprints:
+                    original = fingerprints[fingerprint]
+                    skipped_duplicates[input_file.name] = original
+                    blocks_by_file.pop(input_file.name, None)
+                    warnings.append(
+                        f"文件 {input_file.name} 的 sheet「{sheet_name}」"
+                        f"与文件 {original} 内容完全相同，已跳过"
+                    )
+                    report((index + 1) / total, f"跳过重复 {input_file.name} / {sheet_name}")
+                    continue
+                fingerprints[fingerprint] = input_file.name
+            added = self._append_file_rows(
+                ws,
+                input_file,
+                config,
+                sheet_plan,
+                job,
+                warnings,
+                sheet_warnings,
+                lambda fraction, message: report((index + fraction) / total, message),
+                max_data_row=blocks[0][2],
+            )
+            source_rows[input_file.name] = added
+            report((index + 1) / total, f"已合并 {input_file.name} / {sheet_name}")
+        if (
+            last_row_before_append is not None
+            and ws.max_row > last_row_before_append
+        ):
+            extended_ranges[sheet_name] = (
+                config.header_row + 1,
+                last_row_before_append,
+                ws.max_row,
+            )
+        self._insert_sub_blocks(
+            ws, sheet_name, files, blocks_by_file, source_rows, sheet_warnings
+        )
+        self._avoid_chart_anchors(ws, block1_end, ws.max_row, warnings)
+
+    def _insert_sub_blocks(
+        self,
+        ws,
+        sheet_name: str,
+        files: list[Path],
+        blocks_by_file: dict[str, list[tuple[int, int, int]]],
+        source_rows: dict[str, int],
+        sheet_warnings: list[str],
+    ) -> None:
+        """把各文件的小表挂起重插到主表之后：空行分隔 + 块表头一份 + 各文件数据行。"""
+        identities: list[str] = []
+        header_cells_by_identity: dict[str, tuple] = {}
+        entries_by_identity: dict[str, list[tuple[str, str, list]]] = {}
+        for input_file in files:
+            blocks = blocks_by_file.get(input_file.name)
+            if not blocks or len(blocks) < 2:
+                continue
+            for (block_header, data_start, data_end), (header_cells, data_rows) in zip(
+                blocks[1:], _read_sub_block_rows(input_file, sheet_name, blocks[1:])
+            ):
+                identity = _block_identity(header_cells)
+                if identity not in entries_by_identity:
+                    identities.append(identity)
+                    header_cells_by_identity[identity] = header_cells
+                    entries_by_identity[identity] = []
+                fingerprint = _rows_fingerprint([header_cells, *data_rows])
+                entries_by_identity[identity].append(
+                    (input_file.name, fingerprint, data_rows)
+                )
+        for identity in identities:
+            # 每个小表前留一个空行分隔
+            next_row = ws.max_row + 2
+            for cell in header_cells_by_identity[identity]:
+                if cell.value is None and not getattr(cell, "has_style", False):
+                    continue
+                out_cell = ws.cell(row=next_row, column=cell.column, value=cell.value)
+                if getattr(cell, "has_style", False):
+                    _copy_cell_style(cell, out_cell)
+            next_row += 1
+            seen: dict[str, str] = {}
+            for file_name, fingerprint, data_rows in entries_by_identity[identity]:
+                if fingerprint in seen:
+                    sheet_warnings.append(
+                        f"文件 {file_name} 的 sheet「{sheet_name}」小表与文件 "
+                        f"{seen[fingerprint]} 内容完全相同，已跳过"
+                    )
+                    continue
+                seen[fingerprint] = file_name
+                for row in data_rows:
+                    if all(normalize_split_value(cell.value) is None for cell in row):
+                        continue
+                    for cell in row:
+                        if cell.value is None and not getattr(cell, "has_style", False):
+                            continue
+                        value = cell.value
+                        if isinstance(value, str) and value.startswith("="):
+                            value, _translated = _translate_formula(
+                                value, cell.coordinate, cell.column, next_row
+                            )
+                        out_cell = ws.cell(row=next_row, column=cell.column, value=value)
+                        if getattr(cell, "has_style", False):
+                            _copy_cell_style(cell, out_cell)
+                    source_rows[file_name] = source_rows.get(file_name, 0) + 1
+                    next_row += 1
+
+    def _avoid_chart_anchors(
+        self, ws, block1_end: int, final_end: int, warnings: list[str]
+    ) -> None:
+        """图表锚点落在主表之下（小表区/图表区）的，整体下移到最终内容末行之后。"""
+        for chart in getattr(ws, "_charts", None) or []:
+            try:
+                anchor = getattr(chart, "anchor", None)
+                from_marker = getattr(anchor, "_from", None)
+                if from_marker is None:
+                    continue
+                from_row = from_marker.row + 1  # openpyxl 锚点是 0 基
+                if from_row <= block1_end:
+                    continue  # 主表区内的锚点不动
+                offset = final_end + 1 - from_row
+                if offset <= 0:
+                    continue
+                from_marker.row += offset
+                to_marker = getattr(anchor, "to", None)
+                if to_marker is not None:
+                    to_marker.row += offset
+            except Exception as exc:
+                warnings.append(
+                    f"调整图表位置失败（{ws.title}）：{exc}，已保留原位置"
+                )
+
     def _prepare_union_columns(
         self,
         ws,
@@ -325,8 +522,12 @@ class MergeEngine:
         warnings: list[str],
         sheet_warnings: list[str],
         report: Callable[[float, str], None],
+        max_data_row: int | None = None,
     ) -> int:
-        """流式读取一个文件的数据行，按表头名映射追加到模板 sheet 末尾。"""
+        """流式读取一个文件的数据行，按表头名映射追加到模板 sheet 末尾。
+
+        max_data_row 用于多表区 sheet：只读主表范围内的数据行。
+        """
         sheet_name = config.sheet_name
         union_headers = sheet_plan.union_headers
         file_headers = sheet_plan.headers_by_file[input_file.name]
@@ -348,7 +549,9 @@ class MergeEngine:
             total_rows = (
                 sheet.max_row - config.header_row if sheet.max_row is not None else None
             )
-            for row in sheet.iter_rows(min_row=config.header_row + 1):
+            for row in sheet.iter_rows(
+                min_row=config.header_row + 1, max_row=max_data_row
+            ):
                 is_empty = True
                 pending: list[tuple[int, object, object]] = []  # (目标列, 值, 源单元格)
                 for index, cell in enumerate(row):
@@ -502,6 +705,54 @@ def _extend_ref_formula(
         f":${get_column_letter(max_col)}${after}"
     )
     return f"{prefix}!{new_range}" if prefix is not None else new_range
+
+
+def _read_file_blocks(path: Path, sheet_name: str, header_row: int):
+    """流式检测一个文件指定 sheet 的表区结构后立即关闭。"""
+    workbook, _ = load_workbook_with_warnings(path, data_only=False, read_only=True)
+    try:
+        return detect_blocks(workbook[sheet_name], header_row)
+    finally:
+        workbook.close()
+
+
+def _read_sub_block_rows(path: Path, sheet_name: str, blocks) -> list[tuple[tuple, list]]:
+    """流式读取各小表的块表头行与数据行（含样式），立即关闭。"""
+    workbook, _ = load_workbook_with_warnings(path, data_only=False, read_only=True)
+    try:
+        sheet = workbook[sheet_name]
+        result = []
+        for block_header, data_start, data_end in blocks:
+            header_cells = tuple(
+                next(sheet.iter_rows(min_row=block_header, max_row=block_header))
+            )
+            data_rows = [
+                tuple(row)
+                for row in sheet.iter_rows(min_row=data_start, max_row=data_end)
+            ]
+            result.append((header_cells, data_rows))
+        return result
+    finally:
+        workbook.close()
+
+
+def _block_identity(header_cells) -> str:
+    """小表身份 = 块表头规范化文本（strip 后拼接）。"""
+    return "|".join(
+        str(cell.value).strip()
+        for cell in header_cells
+        if cell.value is not None and str(cell.value).strip()
+    )
+
+
+def _rows_fingerprint(rows) -> str:
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update(b"\x1e")
+        for cell in row:
+            value = getattr(cell, "value", cell)
+            digest.update(_fingerprint_token(value))
+    return digest.hexdigest()
 
 
 def _translate_formula(

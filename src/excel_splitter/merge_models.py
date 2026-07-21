@@ -11,6 +11,8 @@ class MergeSheetConfig:
     sheet_name: str
     header_row: int = 1
     identical: bool = False  # 用户标记各文件中该 sheet 内容完全一致，只保留一份不合并
+    # 用户手动标记该 sheet 表头下方有额外表区（小表格），标记后按块检测并挂起重插
+    has_sub_blocks: bool = False
 
     def validate(self) -> None:
         if not self.sheet_name.strip():

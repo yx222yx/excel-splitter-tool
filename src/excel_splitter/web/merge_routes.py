@@ -9,10 +9,11 @@ from uuid import uuid4
 from flask import Blueprint, current_app, jsonify, request, url_for
 
 from ..encryption import decrypt_file, encrypt_file, is_encrypted
-from ..excel_io import load_workbook_with_warnings
+from ..excel_io import detect_blocks, load_workbook_with_warnings
 from ..merge_engine import MergeEngine
 from ..merge_models import MergeJob, MergeSheetConfig, MergeSummary
 from ..merge_planning import MergePlan, build_merge_plan, display_headers
+from ..models import MAX_HEADER_ROW
 from .routes import _jobs, _json_payload, _json_value, _required_text
 
 
@@ -209,6 +210,60 @@ def merge_preview():
     raise ValueError(f"没有文件包含 sheet：{sheet_name}")
 
 
+@merge_api.post("/sheet-blocks")
+def merge_sheet_blocks():
+    """对每个已解密输入文件做表区检测（合并侧，用户手动标记后按需调用）。"""
+    payload = _json_payload()
+    job = _get_merge_job(payload.get("job_id"))
+    sheet_name = _required_text(payload, "sheet_name")
+    try:
+        header_row = int(payload.get("header_row", 1))
+    except (TypeError, ValueError):
+        raise ValueError("表头行必须是数字")
+    if header_row < 1 or header_row > MAX_HEADER_ROW:
+        raise ValueError(f"表头行必须位于前 {MAX_HEADER_ROW} 行")
+
+    result_files: list[dict[str, Any]] = []
+    for item in job["files"]:
+        if item["encrypted"]:
+            continue
+        workbook, _ = load_workbook_with_warnings(
+            Path(item["stored_path"]), data_only=False, read_only=True
+        )
+        try:
+            if sheet_name not in workbook.sheetnames:
+                continue
+            sheet = workbook[sheet_name]
+            if sheet.max_row is not None and header_row > sheet.max_row:
+                raise ValueError(f"{sheet_name} 的表头行超出有效范围")
+            blocks = detect_blocks(sheet, header_row)
+            entries = []
+            for block_header, data_start, data_end in blocks:
+                preview_row = next(
+                    sheet.iter_rows(min_row=block_header, max_row=block_header, values_only=True)
+                )
+                preview_values = [
+                    str(value).strip()
+                    for value in preview_row
+                    if value is not None and str(value).strip()
+                ][:3]
+                entries.append(
+                    {
+                        "header_row": block_header,
+                        "data_start": data_start,
+                        "data_end": data_end,
+                        "data_rows": max(0, data_end - data_start + 1),
+                        "header_preview": " / ".join(preview_values),
+                    }
+                )
+            result_files.append({"filename": item["filename"], "blocks": entries})
+        finally:
+            workbook.close()
+    if not result_files:
+        raise ValueError(f"没有文件包含 sheet：{sheet_name}")
+    return jsonify(sheet_name=sheet_name, files=result_files)
+
+
 @merge_api.post("/plan")
 def merge_plan():
     payload = _json_payload()
@@ -385,6 +440,7 @@ def _merge_sheet_configs(raw_configs: Any) -> tuple[MergeSheetConfig, ...]:
                 sheet_name=str(raw["sheet_name"]),
                 header_row=int(raw.get("header_row", 1)),
                 identical=bool(raw.get("identical", False)),
+                has_sub_blocks=bool(raw.get("has_sub_blocks", False)),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("sheet 配置缺少有效的表头行") from exc
