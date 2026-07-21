@@ -10,6 +10,7 @@ from .models import MAX_HEADER_ROW
 class MergeSheetConfig:
     sheet_name: str
     header_row: int = 1
+    identical: bool = False  # 用户标记各文件中该 sheet 内容完全一致，只保留一份不合并
 
     def validate(self) -> None:
         if not self.sheet_name.strip():

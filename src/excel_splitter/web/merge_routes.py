@@ -214,10 +214,21 @@ def merge_plan():
     payload = _json_payload()
     job = _get_merge_job(payload.get("job_id"))
     configs = _merge_sheet_configs(payload.get("sheet_configs"))
-    plan = build_merge_plan(_readable_files(job), configs)
+    # identical 的 sheet 用户已确认内容一致，跳过字段扫描，返回标记即可
+    identical_names = [config.sheet_name for config in configs if config.identical]
+    scan_configs = tuple(config for config in configs if not config.identical)
+    plan = (
+        build_merge_plan(_readable_files(job), scan_configs)
+        if scan_configs
+        else MergePlan(sheets=[])
+    )
     job["_merge_plan"] = plan
     job["_merge_plan_configs"] = configs
-    return jsonify(_serialize_plan(plan))
+    result = _serialize_plan(plan)
+    result["sheets"] = [
+        {"sheet_name": name, "identical": True} for name in identical_names
+    ] + result["sheets"]
+    return jsonify(result)
 
 
 @merge_api.post("/execute")
@@ -373,6 +384,7 @@ def _merge_sheet_configs(raw_configs: Any) -> tuple[MergeSheetConfig, ...]:
             config = MergeSheetConfig(
                 sheet_name=str(raw["sheet_name"]),
                 header_row=int(raw.get("header_row", 1)),
+                identical=bool(raw.get("identical", False)),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("sheet 配置缺少有效的表头行") from exc

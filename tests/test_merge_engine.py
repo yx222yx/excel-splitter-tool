@@ -173,13 +173,14 @@ def test_merge_keeps_title_area_from_first_file_when_header_row_late(tmp_path):
 
 
 def test_merge_skips_blank_rows(tmp_path):
+    # 模板（第一个文件）的行照抄不动，空行保留；追加文件的整行皆空才跳过
     file_a = _make_workbook(
         tmp_path / "部门A.xlsx",
-        {"工时": [["姓名", "工时"], ["张三", 8], [None, None], [" ", None], ["李四", 7]]},
+        {"工时": [["姓名", "工时"], ["张三", 8], ["李四", 7]]},
     )
     file_b = _make_workbook(
         tmp_path / "部门B.xlsx",
-        {"工时": [["姓名", "工时"], ["王五", 6]]},
+        {"工时": [["姓名", "工时"], ["王五", 6], [None, None], [" ", None], ["赵六", 5]]},
     )
     output = tmp_path / "合并结果.xlsx"
     job = MergeJob(
@@ -190,12 +191,13 @@ def test_merge_skips_blank_rows(tmp_path):
 
     summary = MergeEngine().execute(job)
 
-    assert summary.total_rows == 3
+    assert summary.total_rows == 4
     assert _read_rows(output, "工时") == [
         ["姓名", "工时"],
         ["张三", 8],
         ["李四", 7],
         ["王五", 6],
+        ["赵六", 5],
     ]
 
 
@@ -579,3 +581,171 @@ def test_merge_preserves_title_rows_when_header_row_is_three(tmp_path):
     assert {str(item) for item in sheet.merged_cells.ranges} == {"A1:C1", "A2:B2"}
     assert sheet.row_dimensions[1].height == 30
     workbook.close()
+
+
+def test_merge_keeps_template_formulas_untouched(tmp_path):
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {"工时": [["姓名", "工时", "双倍"], ["张三", 8, "=B2*2"], ["李四", 7, "=B3*2"]]},
+    )
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {"工时": [["姓名", "工时", "双倍"], ["王五", 6, "=B2*2"]]},
+    )
+    output = tmp_path / "合并结果.xlsx"
+    job = MergeJob(
+        input_files=(file_a, file_b),
+        output_file=output,
+        sheet_configs=(MergeSheetConfig("工时"),),
+    )
+
+    MergeEngine().execute(job)
+
+    workbook = load_workbook(output)
+    sheet = workbook["工时"]
+    # 模板自己的公式原文不动
+    assert sheet["C2"].value == "=B2*2"
+    assert sheet["C3"].value == "=B3*2"
+    workbook.close()
+
+
+def test_merge_translates_appended_formulas(tmp_path):
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {"工时": [["姓名", "工时", "公式"], ["张三", 8, None], ["李四", 7, None]]},
+    )
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {
+            "工时": [
+                ["姓名", "工时", "公式"],
+                ["王五", 6, "=B2*2"],
+                ["赵六", 5, "=$B$2+B3"],
+                ["孙七", 4, "=汇总!A2*2"],
+            ],
+            "汇总": [["指标"], [100]],
+        },
+    )
+    output = tmp_path / "合并结果.xlsx"
+    job = MergeJob(
+        input_files=(file_a, file_b),
+        output_file=output,
+        sheet_configs=(MergeSheetConfig("工时"), MergeSheetConfig("汇总")),
+    )
+
+    MergeEngine().execute(job)
+
+    workbook = load_workbook(output)
+    sheet = workbook["工时"]
+    # B 的数据行追加到第 4-6 行：相对引用平移、绝对引用不变、跨 sheet 引用也平移
+    assert sheet["C4"].value == "=B4*2"
+    assert sheet["C5"].value == "=$B$2+B5"
+    assert sheet["C6"].value == "=汇总!A4*2"
+    workbook.close()
+
+
+def test_identical_sheet_keeps_template_and_never_reads_other_files(tmp_path, monkeypatch):
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {"汇总": [["指标"], [100], [200]], "工时": [["姓名"], ["张三"]]},
+    )
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {"汇总": [["指标"], [100], [200]], "工时": [["姓名"], ["王五"]]},
+    )
+    opened: list[Path] = []
+
+    import excel_splitter.merge_engine as engine_module
+
+    original_loader = engine_module.load_workbook_with_warnings
+
+    def recording_loader(path, **kwargs):
+        opened.append(Path(getattr(path, "name", path)))
+        return original_loader(path, **kwargs)
+
+    monkeypatch.setattr(engine_module, "load_workbook_with_warnings", recording_loader)
+
+    output = tmp_path / "合并结果.xlsx"
+    job = MergeJob(
+        input_files=(file_a, file_b),
+        output_file=output,
+        sheet_configs=(
+            MergeSheetConfig("汇总", identical=True),
+            MergeSheetConfig("工时"),
+        ),
+        skip_duplicate_sheets=False,  # 关闭指纹去重后，B 只应为「工时」被读一次
+    )
+    summary = MergeEngine().execute(job)
+
+    results = {r.sheet_name: r for r in summary.results}
+    assert results["汇总"].source_rows == {"部门A.xlsx": 2}
+    assert results["工时"].source_rows == {"部门A.xlsx": 1, "部门B.xlsx": 1}
+    # identical 的「汇总」对其他文件零读取：B 仅因追加「工时」被读取一次
+    reads_of_b = [
+        p for p in opened
+        if isinstance(p, Path) and p.name == "部门B.xlsx"
+    ]
+    assert len(reads_of_b) == 1
+    assert _read_rows(output, "汇总") == [["指标"], [100], [200]]
+
+
+def test_identical_sheet_copied_from_later_file_when_template_lacks_it(tmp_path):
+    file_a = _make_workbook(
+        tmp_path / "部门A.xlsx",
+        {"工时": [["姓名"], ["张三"]]},
+    )
+    file_b = _make_workbook(
+        tmp_path / "部门B.xlsx",
+        {"汇总": [["指标", "说明"], [100, "完整拷贝"]], "工时": [["姓名"], ["王五"]]},
+    )
+    workbook = load_workbook(file_b)
+    workbook["汇总"].column_dimensions["A"].width = 23
+    workbook.save(file_b)
+    workbook.close()
+
+    output = tmp_path / "合并结果.xlsx"
+    job = MergeJob(
+        input_files=(file_a, file_b),
+        output_file=output,
+        sheet_configs=(
+            MergeSheetConfig("汇总", identical=True),
+            MergeSheetConfig("工时"),
+        ),
+    )
+    summary = MergeEngine().execute(job)
+
+    results = {r.sheet_name: r for r in summary.results}
+    assert results["汇总"].source_rows == {"部门B.xlsx": 1}
+    workbook = load_workbook(output)
+    assert workbook.sheetnames == ["汇总", "工时"]
+    sheet = workbook["汇总"]
+    assert sheet["A1"].value == "指标"
+    assert sheet["B2"].value == "完整拷贝"
+    assert sheet.column_dimensions["A"].width == 23
+    workbook.close()
+
+
+def test_header_row_appears_only_once_with_three_files(tmp_path):
+    files = [
+        _make_workbook(
+            tmp_path / f"部门{letter}.xlsx",
+            {"工时": [["姓名", "工时"], [f"员工{letter}", index + 5]]},
+        )
+        for index, letter in enumerate("ABC")
+    ]
+    output = tmp_path / "合并结果.xlsx"
+    job = MergeJob(
+        input_files=tuple(files),
+        output_file=output,
+        sheet_configs=(MergeSheetConfig("工时"),),
+    )
+
+    MergeEngine().execute(job)
+
+    workbook = load_workbook(output)
+    column_a = [
+        row[0] for row in workbook["工时"].iter_rows(values_only=True)
+    ]
+    workbook.close()
+    assert column_a.count("姓名") == 1
+    assert column_a == ["姓名", "员工A", "员工B", "员工C"]

@@ -551,7 +551,7 @@ byId("merge-to-fields").addEventListener("click", () => {
   if (!selected.length) return showAlert("至少选择一个 Sheet");
   mergeState.selectedSheets = selected;
   // 只渲染卡片骨架，预览懒加载（展开时才请求），避免多 sheet 时一次性渲染卡顿
-  byId("merge-sheet-configs").innerHTML = selected.map((name) => `<article class="merge-sheet-card" data-sheet="${escapeHtml(name)}" data-header-row="1"><header class="merge-card-header"><strong>${escapeHtml(name)}</strong><span class="muted merge-card-source">预览取自第一个包含该 Sheet 的文件</span><label class="merge-card-header-row">表头行<select class="merge-header-row-select">${mergeHeaderRowOptions(15, 1)}</select></label><button type="button" class="secondary small merge-card-toggle">展开预览</button></header><div class="merge-card-preview" hidden></div></article>`).join("");
+  byId("merge-sheet-configs").innerHTML = selected.map((name) => `<article class="merge-sheet-card" data-sheet="${escapeHtml(name)}" data-header-row="1"><header class="merge-card-header"><strong>${escapeHtml(name)}</strong><span class="muted merge-card-source">预览取自第一个包含该 Sheet 的文件</span><label class="merge-card-header-row">表头行<select class="merge-header-row-select">${mergeHeaderRowOptions(15, 1)}</select></label><button type="button" class="secondary small merge-card-toggle">展开预览</button></header><label class="merge-card-identical"><input type="checkbox" class="merge-identical-checkbox"><span>各文件中该 Sheet 内容完全一致，只保留一份（不合并）</span></label><div class="muted merge-identical-hint" hidden>已标记为内容完全一致，合并时只保留第一个文件中的该 Sheet</div><div class="merge-card-preview" hidden></div></article>`).join("");
   byId("merge-plan-results").innerHTML = "";
   mergeState.maxStep = Math.max(mergeState.maxStep, 3);
   mergeGoStep(3);
@@ -567,6 +567,7 @@ function mergeSheetConfigs() {
   return [...document.querySelectorAll(".merge-sheet-card")].map((card) => ({
     sheet_name: card.dataset.sheet,
     header_row: Number(card.dataset.headerRow) || 1,
+    identical: card.querySelector(".merge-identical-checkbox").checked,
   }));
 }
 
@@ -600,6 +601,18 @@ byId("merge-sheet-configs").addEventListener("click", async (event) => {
 });
 
 byId("merge-sheet-configs").addEventListener("change", (event) => {
+  const identicalBox = event.target.closest(".merge-identical-checkbox");
+  if (identicalBox) {
+    const card = identicalBox.closest(".merge-sheet-card");
+    card.querySelector(".merge-card-header-row").hidden = identicalBox.checked;
+    card.querySelector(".merge-card-toggle").hidden = identicalBox.checked;
+    card.querySelector(".merge-identical-hint").hidden = !identicalBox.checked;
+    if (identicalBox.checked) {
+      card.querySelector(".merge-card-preview").hidden = true;
+      card.querySelector(".merge-card-toggle").textContent = "展开预览";
+    }
+    return;
+  }
   const select = event.target.closest(".merge-header-row-select");
   if (!select) return;
   const card = select.closest(".merge-sheet-card");
@@ -631,6 +644,9 @@ byId("merge-check-plan").addEventListener("click", async () => {
 
 function renderMergePlan(plan) {
   const sheets = plan.sheets.map((sheet) => {
+    if (sheet.identical) {
+      return `<article class="merge-plan-sheet"><h2>${escapeHtml(sheet.sheet_name)}</h2><div class="muted">已标记为内容完全一致，合并时只保留第一个文件中的该 Sheet，不做字段检查</div></article>`;
+    }
     const issues = [];
     Object.entries(sheet.missing_fields).forEach(([file, fields]) => issues.push(`文件 ${escapeHtml(file)} 缺少字段：${escapeHtml(fields.join("、"))}，对应列将留空`));
     Object.entries(sheet.extra_fields).forEach(([file, fields]) => issues.push(`文件 ${escapeHtml(file)} 多出字段：${escapeHtml(fields.join("、"))}，将追加到表头末尾`));

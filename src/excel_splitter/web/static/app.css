@@ -193,3 +193,7 @@ select, input[type="text"] { min-height: 40px; width: 100%; border: 1px solid #a
 .merge-field-matrix .merge-matrix-file { text-align: left; }
 .merge-field-has { color: #176b57; font-weight: 700; }
 .merge-field-missing { color: #bd3f38; background: #fff6f5; }
+
+.merge-card-identical { margin-top: 10px; display: flex; align-items: center; gap: 8px; color: #4e5d68; font-size: 13px; cursor: pointer; }
+.merge-card-identical input { width: 18px; height: 18px; accent-color: #176b57; }
+.merge-identical-hint { margin-top: 8px; font-size: 13px; }

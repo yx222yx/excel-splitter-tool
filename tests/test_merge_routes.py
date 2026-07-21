@@ -443,3 +443,58 @@ def test_merge_preview_returns_first_rows_from_first_file(tmp_path):
     )
     assert missing.status_code == 400
     assert "没有文件包含 sheet" in missing.get_json()["error"]
+
+
+def test_merge_plan_and_execute_with_identical_sheet(tmp_path):
+    client = _app(tmp_path).test_client()
+    loaded = _upload(
+        client,
+        [
+            (
+                _xlsx_bytes({
+                    "汇总": [["指标"], [100]],
+                    "工时": [["姓名"], ["张三"]],
+                }),
+                "部门A.xlsx",
+            ),
+            (
+                _xlsx_bytes({
+                    "汇总": [["指标"], [100]],
+                    "工时": [["姓名"], ["王五"]],
+                }),
+                "部门B.xlsx",
+            ),
+        ],
+    )
+    job_id = loaded.get_json()["job_id"]
+    configs = [
+        {"sheet_name": "汇总", "header_row": 1, "identical": True},
+        {"sheet_name": "工时", "header_row": 1},
+    ]
+
+    plan = client.post("/api/merge/plan", json={"job_id": job_id, "sheet_configs": configs})
+    assert plan.status_code == 200
+    sheets = plan.get_json()["sheets"]
+    assert sheets[0] == {"sheet_name": "汇总", "identical": True}
+    assert sheets[1]["sheet_name"] == "工时"
+    assert sheets[1]["union_headers"] == ["姓名"]
+
+    executed = client.post(
+        "/api/merge/execute",
+        json={
+            "job_id": job_id,
+            "sheet_configs": configs,
+            "output_dir": str(tmp_path / "输出"),
+            "background": False,
+        },
+    )
+    assert executed.status_code == 200
+    result = executed.get_json()
+    by_sheet = {item["sheet_name"]: item for item in result["results"]}
+    assert by_sheet["汇总"]["source_rows"] == {"部门A.xlsx": 1}
+    assert by_sheet["工时"]["source_rows"] == {"部门A.xlsx": 1, "部门B.xlsx": 1}
+
+    workbook = load_workbook(Path(result["output_file"]))
+    rows = [list(row) for row in workbook["汇总"].iter_rows(values_only=True)]
+    workbook.close()
+    assert rows == [["指标"], [100]]
