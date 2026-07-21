@@ -7,6 +7,7 @@ import tempfile
 
 from flask import Flask, jsonify, request
 
+from .merge_routes import merge_api
 from .routes import api
 
 
@@ -29,6 +30,7 @@ def create_app(config: dict | None = None) -> Flask:
     app.config["DEFAULT_OUTPUT_DIR"].mkdir(parents=True, exist_ok=True)
     app.extensions["excel_splitter_jobs"] = {}
     app.register_blueprint(api)
+    app.register_blueprint(merge_api)
 
     if app.config["UPLOAD_DIR"] == generated_upload_dir:
         atexit.register(shutil.rmtree, generated_upload_dir, True)
